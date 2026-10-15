@@ -182,7 +182,8 @@ this checks them over Steam between two real players.
     can do it; on A it clears loose products for both players.
 12. **The 0.2.0 bug (lanes).** A holds left click at the manual duck workbench: B sees
     the new duck pop out. B does the same at the bench: a duck appears on both screens.
-    B grabs it. In both `pittapi.log`s the `mp stats` lines show `ch3` traffic in both
+    B grabs it. B's money (top right) equals A's and changes when A spends or earns.
+    In both `pittapi.log`s the `mp stats` lines show `ch3` traffic in both
     directions (`ch3 tx N/..B rx M/..B` with N, M > 0 on the host and the client) and
     `drops {}`; there is no `protocol drop kind_not_allowed:ents` (or `:interact`,
     `:own_req`) WARN.

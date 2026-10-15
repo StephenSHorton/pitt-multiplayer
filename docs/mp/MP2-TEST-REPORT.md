@@ -45,6 +45,21 @@ p95 16.9 cm, rest 0.7 mm, 0 strays, 0 orphan frames of 198 626 records); `test-m
 PASSED. Real save folder unchanged in every run. Still only checkable over real Steam: that
 GodotSteam delivers lane 1 with the tag (manual test 15.12), fragmentation (15.9).
 
+**Second symptom, "the client couldn't see the money".** Not reproduced, and not a separate
+bug as far as the release client goes: new check H1 reads the real client's HUD money label.
+With the 0.2.0 transport under the lane limit (`-ClientLive -Scenario D1 -SteamLanes 4`, lane
+map off) the label was drawn (alpha 1.0, on screen at 1652,0 640x65 on 3440x1440), showed
+`5,000,000$` = the host's money at the join and at the end, and `GameState.is_game_started`
+was true (`player_controller._ready` calls `GameState.start_game()` on the client too); only
+D1/D2 failed. With 0.2.1 the full run passes H1 too (host 98/98, client 105/105; end check
+`4,758,517$` on both). Money travels on ch0 (`econ`), which the lane bug never touched; what
+0.2.0 did break is every money change a client causes (its sales, crafts and purchases on
+the host's side never happened, since its interactions were dropped), which likely read as
+"money doesn't work". The friend's log (only "world snapshot applied in 43 ms" after boot)
+matches the silent ch3 drop; the 45 s between "joined" and the world snapshot was the
+client loading world.tscn, no timeout path ran. Still worth confirming over Steam (manual
+15.12 now also asks for the HUD money on B).
+
 New harness pieces: `-ClientLive` (the shipped release build as client), `-SteamLanes`,
 D1/D2 (the manual duck workbench driven through `interact_ray` with a held LMB on each
 side), diagnostics (README "Diagnostics").

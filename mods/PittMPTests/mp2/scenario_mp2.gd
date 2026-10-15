@@ -46,6 +46,9 @@ func run() -> void:
 		await _sub(GrabHost).run_grab(_ids(GRAB_IDS))
 		if wants("B6"):
 			await _b6_host()
+		# H1 (end): the client's HUD money label shows this value
+		await wait_peer_mark("hud_money_req", 120.0)
+		report.mark("hud_money_host", {"hud_money": money()})
 		await wait_peer_mark("mp2_end_checked", 60.0)
 		if wants("G5"):
 			await wait_peer_mark("client_positioned_g5", 120.0)
@@ -82,6 +85,9 @@ func run() -> void:
 		await _sub(GrabClient).run_grab(_ids(GRAB_IDS))
 		if wants("B6"):
 			await _b6_client()
+		report.mark("hud_money_req")
+		var hm: Dictionary = await wait_peer_mark("hud_money_host", 60.0)
+		await _check_hud_money("h1_end", String(hm.get("hud_money", "")))
 		_end_checks()
 		report.mark("mp2_end_checked")
 		if wants("G5"):
@@ -173,7 +179,41 @@ func _client_join() -> bool:
 	await sleep_ms(300)
 	_join_pos = player().global_position if player() != null else Vector3.INF
 	report.mark("client_in_game", {"money": money(), "phase": phase()})
+	if side == "client":
+		var wo: Dictionary = await wait_peer_mark("world_open", 5.0)
+		await _check_hud_money("h1_join", String(wo.get("money", "")))
 	return true
+
+
+## H1: the game's own HUD money label (hud.gd $Money, fed by GameState.money_updated)
+## is drawn and shows the host's money (the second real Steam report: "the client
+## couldn't see the money").
+func _check_hud_money(tag: String, host_digits: String) -> void:
+	var gs = g("GameState")
+	var hud := tree().get_first_node_in_group("HUD")
+	var label = hud.get_node_or_null("Money") if hud != null else null
+	if not report.check(tag + "_hud_money_label", label is Label, "hud %s" % str(hud)):
+		return
+	var want := ""
+	if gs != null and gs.money != null and host_digits.is_valid_int():
+		want = "%s$" % gs.format_big_number(gs.money.get_script().from_string(host_digits))
+	var ok: bool = await wait_for(func(): return want != "" and (label as Label).text == want, 3.0)
+	var l := label as Label
+	report.value(tag + "_hud_money", {"text": l.text, "want": want, "host": host_digits, "local": money()})
+	report.check(tag + "_hud_money_shows_host_value", ok, "label %s, host %s (%s), local %s" % [l.text, want,
+		host_digits, money()])
+	var on_screen := l.get_global_rect().intersects(Rect2(Vector2.ZERO, l.get_viewport_rect().size))
+	var n: Node = l
+	while n != null:
+		if n is CanvasLayer and not (n as CanvasLayer).visible:
+			on_screen = false
+		n = n.get_parent()
+	report.check(tag + "_hud_money_visible", l.is_visible_in_tree() and l.modulate.a > 0.5
+		and l.self_modulate.a > 0.5 and on_screen and l.get_global_rect().size.x > 1.0, "visible %s alpha %.2f on screen %s rect %s" % [
+		l.is_visible_in_tree(), l.modulate.a, on_screen, str(l.get_global_rect())])
+	report.check(tag + "_game_started", gs != null and gs.get("is_game_started") == true, "GameState.is_game_started %s" % str(
+		gs.get("is_game_started") if gs != null else null))
+	await shot(tag + "-hud-money")
 
 
 ## 11.2 end checks (client).

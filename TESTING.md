@@ -156,6 +156,7 @@ files run in order. BODIES (`mp2/bodies_host.gd`, `mp2/bodies_client.gd`):
 | B2 | 20 recycled -> gone on the client; same-frame recycle + respawn -> new eid on both, no leftover |
 | B7 | a client-local `add_money` reverted within a frame and counted; `PittMultiplayer.contribute` unknown |
 | D1 | the host holds LMB at the manual duck workbench (the game's own `interact_ray` -> `workbench.craft_item` spawn): the client sees the duck with the host eid within 1.5 s |
+| H1 | client, right after the join and again at the end: the game's HUD money label (`hud.gd` `$Money`) is drawn on screen (visible, opaque, inside the viewport, its CanvasLayer shown), shows the host's money formatted as the game does, and `GameState.is_game_started` is true |
 | D2 | the client holds LMB at its copy of the bench: the forwarded craft makes a duck on the host, the client sees it, no local craft; releasing stops the host's bench |
 | end | client: no unexpected strays, orphan frames <= 1 %, local money writes only where expected, 60 Hz |
 
