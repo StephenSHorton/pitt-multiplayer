@@ -147,13 +147,15 @@ func _define_config() -> void:
 	c.define("steam_peer_mode", "socket", {"options": ["socket", "lobby"],
 		"description": "SteamMultiplayerPeer: create_host/create_client (socket) or host_with_lobby/connect_to_lobby"})
 	c.define("rate_limits", true)
+	c.define("dev_lane_cap", 0, {"min": 0, "max": 16,
+		"description": "ENet tests only: emulate GodotSteam's lane limit (4 = the bundled 4.19.1 with max_channels=4); 0 = off"})
 
 
 func _read_config() -> Dictionary:
 	var c = api.config
 	var out := {}
 	for k in ["transport", "dev_address", "dev_port", "dev_targets", "dev_name", "physics_detail", "achievements",
-			"allow_remote_cheats", "steam_peer_mode", "rate_limits"]:
+			"allow_remote_cheats", "steam_peer_mode", "rate_limits", "dev_lane_cap"]:
 		out[k] = c.get_value(k)
 	out["data_dir"] = api.data_dir()
 	return out

@@ -18,13 +18,27 @@ signal opened()
 signal closed(reason: String)
 
 var role := ""                 # "host" | "client"
-var stats := {"tx_bytes": 0, "rx_bytes": 0, "tx_packets": 0, "rx_packets": 0}
+var stats := {"tx_bytes": 0, "rx_bytes": 0, "tx_packets": 0, "rx_packets": 0, "bad_lane": 0}
+## Cumulative per logical channel: ch -> [tx_packets, tx_bytes, rx_packets, rx_bytes].
+var ch_stats: Dictionary = {}
 var _peer: MultiplayerPeer = null
 var _open := false
 var _closed := false
 var _connecting := false
 var _connect_started_ms := 0
 var connect_timeout_ms := 10000
+## Dev / tests (ENet): emulates the bundled GodotSteam 4.19.1 lane limit. Its
+## SteamPacketPeer.send() moves every channel >= max_channels - 1 to lane 0
+## (an off-by-one: with steam/multiplayer_peer/max_channels=4 only lanes 0-2
+## keep their channel). 0 = off.
+var lane_cap_emulation := 0
+## Logical channel -> wire lane (v0.2.1). GodotSteam only keeps lanes 0-2 (see
+## lane_cap_emulation), so CH_WORLD shares lane 1 with CH_BULK; every packet on
+## the shared lane starts with one byte, its logical channel. ch0 and ch2 are
+## unchanged on the wire (a 0.2.0 peer still reads hello / reject).
+const SHARED_LANE := 1
+const LANES := [0, 1, 2, 1]
+var lane_map := true
 
 
 func kind() -> String:
@@ -97,6 +111,13 @@ func poll() -> void:
 		var bytes := _peer.get_packet()
 		stats.rx_bytes += bytes.size()
 		stats.rx_packets += 1
+		var u := unmap_lane(ch, bytes)
+		if int(u.ch) < 0:
+			stats.bad_lane += 1
+			continue
+		ch = int(u.ch)
+		bytes = u.bytes
+		_count(ch, bytes.size(), false)
 		meter(from, ch, bytes.size(), false)
 		packet.emit(from, ch, bytes)
 
@@ -163,15 +184,52 @@ func _flush_conditioned() -> void:
 func _put(peer_id: int, channel: int, bytes: PackedByteArray) -> Error:
 	if _peer == null or _closed:
 		return ERR_UNCONFIGURED
+	var lane := lane_of(channel)
+	var out := bytes
+	if lane_map and lane == SHARED_LANE:
+		out = PackedByteArray([channel])
+		out.append_array(bytes)
+	if lane_cap_emulation > 0 and lane >= lane_cap_emulation - 1:
+		lane = 0
 	_peer.set_target_peer(peer_id)
-	_peer.transfer_channel = channel
+	_peer.transfer_channel = lane
 	_peer.transfer_mode = mode_for(channel)
-	var err := _peer.put_packet(bytes)
+	var err := _peer.put_packet(out)
 	if err == OK:
-		stats.tx_bytes += bytes.size()
+		stats.tx_bytes += out.size()
 		stats.tx_packets += 1
+		_count(channel, bytes.size(), true)
 		meter(peer_id, channel, bytes.size(), true)
 	return err
+
+
+func lane_of(channel: int) -> int:
+	if not lane_map or channel < 0 or channel >= LANES.size():
+		return channel
+	return LANES[channel]
+
+
+## Inbound lane + bytes -> {ch: logical channel (-1 = refused), bytes}.
+func unmap_lane(lane: int, bytes: PackedByteArray) -> Dictionary:
+	if not lane_map or lane != SHARED_LANE:
+		return {"ch": lane, "bytes": bytes}
+	if bytes.size() < 2:
+		return {"ch": -1, "bytes": bytes}
+	var ch := int(bytes[0])
+	if ch < LANES.size() and LANES[ch] == SHARED_LANE:
+		return {"ch": ch, "bytes": bytes.slice(1)}
+	return {"ch": -1, "bytes": bytes}
+
+
+func _count(channel: int, n: int, tx: bool) -> void:
+	var c: Array = ch_stats.get(channel, [0, 0, 0, 0])
+	if tx:
+		c[0] += 1
+		c[1] += n
+	else:
+		c[2] += 1
+		c[3] += n
+	ch_stats[channel] = c
 
 
 static func mode_for(channel: int) -> int:

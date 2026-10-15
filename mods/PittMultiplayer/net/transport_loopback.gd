@@ -162,6 +162,7 @@ func poll() -> void:
 		var p: Dictionary = inbox.pop_front()
 		stats.rx_bytes += p.bytes.size()
 		stats.rx_packets += 1
+		_count(int(p.ch), p.bytes.size(), false)
 		meter(int(p.from), int(p.ch), p.bytes.size(), false)
 		hub.delivered += 1
 		packet.emit(int(p.from), int(p.ch), p.bytes)
@@ -175,6 +176,7 @@ func send(peer_id: int, channel: int, bytes: PackedByteArray) -> Error:
 	hub.route(my_peer, peer_id if role == "host" else 1, channel, bytes)
 	stats.tx_bytes += bytes.size()
 	stats.tx_packets += 1
+	_count(channel, bytes.size(), true)
 	meter(peer_id if role == "host" else 1, channel, bytes.size(), true)
 	return OK
 

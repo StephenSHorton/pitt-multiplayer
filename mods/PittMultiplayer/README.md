@@ -58,6 +58,26 @@ running (late join): they load the host's state, then the current objects.
 `client_earnings` (MP1) is gone and ignored if present. Console: `mp stats` shows
 the bandwidth per peer and channel and the replication counters.
 
+## Diagnostics (0.2.1)
+
+While a session runs, both host and clients write one line every 10 s to
+`...\Project P.I.T.T\pittapi\pittapi.log`:
+
+```
+[INFO ] [PittMultiplayer] mp stats: client in_game/open peers 2 rtt 12 ms | ch0 tx 686/58833B rx 673/133934B, ch1 tx 0/0B rx 2/23494B, ch2 tx 223/9447B rx 7061/5407725B, ch3 tx 15/2343B rx 224/24773B | drops {} | world rx 224 tx 15 buffered 0 dropped 0 | puppets 417 records_rx 210583 orphans 0 strays 0 | avatars 1
+```
+
+(packets/bytes per channel since the session started, protocol drops by reason, world
+messages, replicated objects). The first drop of each reason is also logged once as a
+WARN (`protocol drop kind_not_allowed:ents ...`). When a session ends (or the game
+quits) its full state is written to `...\pittapi\mp_session_last.json`. Please attach
+both files to a bug report.
+
+0.2.1 fixes the first two-PC Steam test: the bundled GodotSteam (4.19.1) only uses Steam
+lanes 0-2 and sent the shared world's channel 3 on lane 0, where it was dropped, so a
+client saw no newly spawned objects and none of its interactions (grabs, machines,
+crafting) reached the host. Host and clients must all run 0.2.1.
+
 ## Known MP2 limitations
 
 - Tool effects of an equipped tool reach the holder one round trip late (the host
@@ -92,7 +112,7 @@ the bandwidth per peer and channel and the replication counters.
   large floors): everyone may feel a short hitch when someone joins a huge factory.
 - Clear items (pause menu) is host-only; it clears the shared world for everyone.
 - Not yet covered by an automated two-instance test (headless only): cannon load/fire,
-  the phase-2 debris, manual bench co-craft, press/terminal by a client, fields and the
+  the phase-2 debris, two players crafting at one manual bench at once, press/terminal by a client, fields and the
   qa_arm acting on a client, equipped vacuum, throwing into the maw while a late joiner
   loads, sticky panels.
 - No host migration, chat, kick UI or sandbox sessions. The physics-detail lobby

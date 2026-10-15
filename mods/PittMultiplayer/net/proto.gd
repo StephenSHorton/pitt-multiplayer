@@ -58,6 +58,9 @@ const KICK_FACTOR := 3.0
 const KICK_WINDOW_S := 5
 
 const RING_CAP := 200
+## first-drop warnings: at most WARN_BURST per WARN_WINDOW_MS (the rest are only counted)
+const WARN_BURST := 8
+const WARN_WINDOW_MS := 10000
 
 
 ## Per-peer inbound state: seq per channel, rate buckets, drop counters.
@@ -79,6 +82,14 @@ var role := ""          # "host" | "client": which side this validator runs on
 var sid := ""           # the session id messages must carry ("" until known)
 var peers: Dictionary = {}   # peer id -> PeerIn
 var drop_counts: Dictionary = {}
+## full reason ("kind_not_allowed:ents") -> count
+var drop_reasons: Dictionary = {}
+## Callable(text: String): called once per (reason, kind) the first time it is dropped
+var on_first_drop: Callable = Callable()
+var warn_suppressed := 0
+var _warned: Dictionary = {}
+var _warn_window_ms := 0
+var _warn_n := 0
 var ring: Array = []
 var rate_limits_enabled := true
 ## module kinds (MP2 10.1), on top of the constants above
@@ -273,6 +284,20 @@ func _take(pi: PeerIn, cls: String) -> bool:
 func _drop(reason: String, peer: int, msg: Dictionary) -> String:
 	var key := reason.get_slice(":", 0)
 	drop_counts[key] = int(drop_counts.get(key, 0)) + 1
+	drop_reasons[reason] = int(drop_reasons.get(reason, 0)) + 1
+	var wk := "%s|%s" % [reason, String(msg.get("k", "?"))]
+	if not _warned.has(wk) and on_first_drop.is_valid():
+		_warned[wk] = true
+		var now := Time.get_ticks_msec()
+		if now - _warn_window_ms >= WARN_WINDOW_MS:
+			_warn_window_ms = now
+			_warn_n = 0
+		_warn_n += 1
+		if _warn_n <= WARN_BURST:
+			on_first_drop.call("protocol drop %s (kind %s, peer %d, role %s): first of its kind" % [reason,
+				String(msg.get("k", "?")), peer, role])
+		else:
+			warn_suppressed += 1
 	if peers.has(peer):
 		peers[peer].drops += 1
 	_log_ring("drop:" + reason, peer, msg)

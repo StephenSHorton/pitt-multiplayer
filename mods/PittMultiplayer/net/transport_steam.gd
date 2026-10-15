@@ -12,6 +12,11 @@ extends "transport.gd"
 ## mode "socket" (default): create_host(0) / create_client(host, 0).
 ## mode "lobby": host_with_lobby(lobby) / connect_to_lobby(lobby).
 ## no_nagle = true on every peer (property present in the bundled GodotSteam).
+## Lanes: the bundled GodotSteam 4.19.1 sends a channel >= max_channels - 1 on
+## lane 0 (the game sets max_channels=4, so only lanes 0-2 work); the base
+## transport's lane map (lane_map, on by default) puts CH_WORLD on lane 1 with a
+## one-byte channel tag. v0.2.0 sent CH_WORLD on lane 3: it arrived on lane 0 and
+## was dropped (kind_not_allowed), so clients saw no spawns and no grant/interact.
 
 const VIRTUAL_PORT := 0
 

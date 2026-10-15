@@ -76,6 +76,9 @@ const WSNAP_APPLY_TIMEOUT_MS := 60000
 ## client: ch3 messages buffered while the world snapshot is fetched / applied
 const WORLD_BUFFER_MAX := 20000
 const DEFAULT_EYE := Vector3(0, 0.65, 0)
+## diagnostics: one INFO line per interval while a session runs; dump() on end
+const STATS_INTERVAL_MS := 10000
+const LAST_DUMP_FILE := "mp_session_last.json"
 
 const CMD_BUY_ITEM := "PittMultiplayer.buy_item"
 const CMD_BUY_TOOL := "PittMultiplayer.buy_tool"
@@ -145,7 +148,8 @@ var _commands_registered := false
 var log_lines: Array = []
 var counters := {"kicked_rate": 0, "rejected": 0, "joins_served": 0, "early_chunks": 0, "world_req_refused": 0,
 	"world_buffered": 0, "world_dropped": 0, "wsnaps_served": 0,
-	"world_too_large": 0, "wsnap_send_failed": 0}
+	"world_too_large": 0, "wsnap_send_failed": 0, "world_rx": 0, "world_tx": 0}
+var _last_stats_ms := 0
 
 # ---- MP2 module registry (10.1)
 var _modules: Array = []
@@ -436,6 +440,8 @@ func send_world(peer: int, k: String, body: Dictionary) -> Error:
 		var e: Error = transport.send(p, Proto.CH_WORLD, bytes)
 		if e != OK:
 			err = e
+		else:
+			counters.world_tx += 1
 	return err
 
 
@@ -548,6 +554,8 @@ func _on_lobby_entered(info: Dictionary) -> void:
 	role = "host" if bool(info.get("is_owner", false)) else "client"
 	proto = Proto.new(role)
 	proto.rate_limits_enabled = bool(config.get("rate_limits", true))
+	proto.on_first_drop = func(text: String): _log("warn", text)
+	_last_stats_ms = clock.now()
 	for kinds in _module_kinds:
 		proto.add_kinds(kinds)
 	transport = _make_transport(String(target.get("kind", "")))
@@ -623,6 +631,7 @@ func _make_transport(kind: String):
 		"enet":
 			var t = TransportEnet.new()
 			t.bind_ip = String(config.get("enet_bind_ip", "127.0.0.1"))
+			t.lane_cap_emulation = int(config.get("dev_lane_cap", 0))
 			return t
 		"steam":
 			var s = TransportSteam.new()
@@ -696,6 +705,7 @@ func _on_packet(peer: int, channel: int, bytes: PackedByteArray) -> void:
 				_client_on_msg(msg)
 		Proto.FRAME_AVATAR:
 			if channel != Proto.CH_AVATAR:
+				proto._drop("wrong_channel:%d" % channel, peer, {"k": "<avatar>"})
 				return
 			if role == "host":
 				if roster.state_of(peer) != "in_game":
@@ -710,6 +720,7 @@ func _on_packet(peer: int, channel: int, bytes: PackedByteArray) -> void:
 			avatars.on_frame(peer, d.frame, bytes)
 		Proto.FRAME_BODIES, Proto.FRAME_HELD:
 			if channel != Proto.CH_AVATAR:
+				proto._drop("wrong_channel:%d" % channel, peer, {"k": "<raw %d>" % int(d.kind)})
 				return
 			if proto.check_raw(peer, int(d.kind)) != "":
 				if role == "host" and proto.should_kick(peer):
@@ -728,6 +739,8 @@ func _on_packet(peer: int, channel: int, bytes: PackedByteArray) -> void:
 		Proto.FRAME_CHUNK:
 			if role == "client" and channel == Proto.CH_BULK:
 				_client_on_chunk(d.chunk)
+			else:
+				proto._drop("wrong_channel:%d" % channel, peer, {"k": "<chunk>"})
 
 
 ## The newest avatar frame per peer, for avatar_pose (host: the sender; client:
@@ -747,6 +760,7 @@ func _cache_avatar(peer: int, frame: Dictionary) -> void:
 ## Client: buffered until the world snapshot is applied, then to its module.
 func _on_world_msg(peer: int, msg: Dictionary) -> void:
 	var k := String(msg.k)
+	counters.world_rx += 1
 	if role == "host":
 		if roster.state_of(peer) != "in_game":
 			counters.world_dropped += 1
@@ -1514,6 +1528,9 @@ func _process(_delta: float) -> void:
 		return
 	if authority != null:
 		authority.tick(now)
+	if now - _last_stats_ms >= STATS_INTERVAL_MS:
+		_last_stats_ms = now
+		_log("info", stats_line())
 	if now - _last_ping_ms >= PING_INTERVAL_MS:
 		_last_ping_ms = now
 		_ping_and_check_silence(now)
@@ -1651,6 +1668,9 @@ func _leave(reason: String, detail: String, return_to_menu: bool) -> void:
 	_tearing_down = true
 	var was_role := role
 	var was_in_world: bool = adapter != null and adapter.in_world()
+	if transport != null:
+		_log("info", stats_line())
+		_write_last_dump(reason, detail)
 	if not (reason in END_REASONS):
 		reason = "error"
 	# 1. not live: extensions go inert
@@ -2122,11 +2142,50 @@ func set_conditioning(cond: Dictionary) -> void:
 		transport.set_conditioning(cond)
 
 
+## One line for the log (every STATS_INTERVAL_MS while a session runs, and at its end):
+## per-channel packets/bytes, protocol drops by reason, ch3 message counts, entities.
+func stats_line() -> String:
+	var chs: Array = []
+	var cs: Dictionary = transport.ch_stats if transport != null and "ch_stats" in transport else {}
+	for ch in Proto.CHANNELS:
+		var c: Array = cs.get(ch, [0, 0, 0, 0])
+		chs.append("ch%d tx %d/%dB rx %d/%dB" % [ch, int(c[0]), int(c[1]), int(c[2]), int(c[3])])
+	var b = get_module("bodies")
+	var bc: Dictionary = b.counters() if b != null and b.has_method("counters") else {}
+	var ents := "tracked %d awake %d" % [int(bc.get("tracked", 0)), int(bc.get("awake", 0))] if role == "host" 		else "puppets %d records_rx %d orphans %d strays %d" % [int(bc.get("puppets", 0)), int(bc.get("records_rx", 0)),
+			int(bc.get("orphan_frames", 0)), int(bc.get("stray_spawns", 0))]
+	var bad_lane := int(transport.stats.get("bad_lane", 0)) if transport != null else 0
+	return "mp stats: %s %s/%s peers %d rtt %d ms | %s | drops %s%s | world rx %d tx %d buffered %d dropped %d | %s | avatars %d" % [
+		role, state, host_state, roster.peers().size() if roster != null else 0, int(clock.rtt_ms) if clock != null else -1,
+		", ".join(chs), JSON.stringify(proto.drop_reasons) if proto != null else "{}",
+		" bad_lane %d" % bad_lane if bad_lane > 0 else "",
+		int(counters.world_rx), int(counters.world_tx), int(counters.world_buffered), int(counters.world_dropped),
+		ents, avatars.puppet_count() if avatars != null else 0]
+
+
+## user://pittapi[-<instance>]/mp_session_last.json: dump() of the session that just ended.
+func _write_last_dump(reason: String, detail: String) -> void:
+	if api == null or not api.has_method("pittapi_dir"):
+		return
+	var d := dump()
+	d["ended"] = {"reason": reason, "detail": detail, "at": Time.get_datetime_string_from_system()}
+	var path: String = String(api.pittapi_dir()).path_join(LAST_DUMP_FILE)
+	var f := FileAccess.open(path + ".tmp", FileAccess.WRITE)
+	if f == null:
+		return
+	f.store_string(JSON.stringify(d, " "))
+	f.close()
+	DirAccess.remove_absolute(path)
+	DirAccess.rename_absolute(path + ".tmp", path)
+
+
 func dump() -> Dictionary:
 	return {"state": state, "role": role, "sub": sub, "host_state": host_state, "sid": sid, "my_peer": my_peer,
 		"roster": roster.to_array(), "rtt_ms": clock.rtt_ms, "offset_ms": clock.offset_ms,
-		"drops": proto.drop_counts.duplicate(), "ring": proto.ring.slice(-40),
+		"drops": proto.drop_counts.duplicate(), "drop_reasons": proto.drop_reasons.duplicate(),
+		"ring": proto.ring.slice(-40),
 		"transport": transport.stats.duplicate() if transport != null else {},
+		"channels": transport.ch_stats.duplicate(true) if transport != null and "ch_stats" in transport else {},
 		"pending_cmds": authority.pending_count() if authority != null else 0,
 		"econ": {"deltas": econ_host.sent_deltas, "fulls": econ_host.sent_fulls, "applied": econ_client.applied,
 			"local_money_writes": econ_client.local_money_writes},
