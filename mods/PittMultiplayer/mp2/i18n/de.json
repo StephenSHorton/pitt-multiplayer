@@ -1,0 +1,7 @@
+{
+  "MP_PHYSICS_OVERLOADED": "Physik überlastet: Andere Spieler erhalten weniger Objekt-Updates",
+  "MP_ERR_WORLD_TOO_BIG": "Die Welt ist zu groß, um sie an einen neuen Spieler zu senden",
+  "MP_ERR_WORLD_SEND": "Die Welt konnte nicht an den neuen Spieler gesendet werden: bitte erneut versuchen",
+  "MP_WORLD_LOADING": "Gemeinsame Welt wird geladen...",
+  "MP_HELD_BY": "Gehalten von {name}"
+}

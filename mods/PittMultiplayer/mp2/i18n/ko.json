@@ -1,0 +1,7 @@
+{
+  "MP_PHYSICS_OVERLOADED": "물리 연산 과부하: 다른 플레이어가 받는 물체 업데이트가 줄어듭니다",
+  "MP_ERR_WORLD_TOO_BIG": "월드가 너무 커서 새 플레이어에게 보낼 수 없습니다",
+  "MP_ERR_WORLD_SEND": "새 플레이어에게 월드를 보내지 못했습니다. 다시 시도하세요",
+  "MP_WORLD_LOADING": "공유 월드를 불러오는 중...",
+  "MP_HELD_BY": "{name} 님이 들고 있음"
+}

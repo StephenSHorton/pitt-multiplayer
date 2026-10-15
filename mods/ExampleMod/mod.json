@@ -1,0 +1,12 @@
+{
+  "id": "ExampleMod",
+  "name": "Example Mod",
+  "version": "1.0.0",
+  "api_version": "^1.0",
+  "entry": "main.gd",
+  "load_order": 100,
+  "extensions": ["extensions/hud_ext.gd"],
+  "game_versions": ["1.0.8"],
+  "multiplayer": "local_only",
+  "description": "Shows how to use PittAPI: a toast on load, an F7 keybind that prints money, and phase/money listeners."
+}

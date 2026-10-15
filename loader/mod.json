@@ -1,0 +1,11 @@
+{
+  "id": "PittAPI",
+  "name": "PittAPI (core)",
+  "version": "1.2.0",
+  "api_version": "^1.2",
+  "entry": "pittapi.gd",
+  "core": true,
+  "game_versions": ["1.0.8"],
+  "multiplayer": "client_required",
+  "description": "Mod loader and modding API for Project P.I.T.T. Loaded through override.cfg, not by itself."
+}

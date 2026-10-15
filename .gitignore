@@ -1,0 +1,5 @@
+# game code is not ours: never commit or redistribute
+decomp/
+.tools/
+dist/
+*.log

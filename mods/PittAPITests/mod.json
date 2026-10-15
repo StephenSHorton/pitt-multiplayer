@@ -1,0 +1,12 @@
+{
+  "id": "PittAPITests",
+  "name": "PittAPI live tests",
+  "version": "1.0.0",
+  "api_version": "^1.0",
+  "entry": "main.gd",
+  "load_order": 1000,
+  "optional_dependencies": {"ExampleMod": ">=1.0.0"},
+  "game_versions": ["1.0.8"],
+  "multiplayer": "local_only",
+  "description": "In-game test suite. Does nothing unless user://pittapi/autotest.flag exists."
+}

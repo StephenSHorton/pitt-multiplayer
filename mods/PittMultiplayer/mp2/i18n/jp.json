@@ -1,0 +1,7 @@
+{
+  "MP_PHYSICS_OVERLOADED": "物理演算が過負荷です：他のプレイヤーへの物体の更新が減ります",
+  "MP_ERR_WORLD_TOO_BIG": "ワールドが大きすぎて新しいプレイヤーに送れません",
+  "MP_ERR_WORLD_SEND": "新しいプレイヤーにワールドを送れませんでした。もう一度お試しください",
+  "MP_WORLD_LOADING": "共有ワールドを読み込み中…",
+  "MP_HELD_BY": "{name} が持っています"
+}

@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PITT Multiplayer</title>
+<meta name="description" content="Unofficial Steam co-op mod for Project P.I.T.T.: friends-only lobbies, one shared world, up to 10 players.">
+<meta property="og:title" content="PITT Multiplayer">
+<meta property="og:description" content="Unofficial Steam co-op mod for Project P.I.T.T. Host, invite your friends, break things together.">
+<meta property="og:image" content="media/pitt-coop.gif">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%232a0620'/%3E%3Crect x='3' y='3' width='4' height='4' fill='%23f7ba14'/%3E%3Crect x='9' y='3' width='4' height='4' fill='%23f7ba14'/%3E%3Crect x='3' y='9' width='10' height='4' fill='%23f7ba14'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=Silkscreen&family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+:root {
+	--bg-0: #12020c;
+	--bg-1: #2a0620;
+	--bg-2: #4a0a2f;
+	--ember: #ff5a1f;
+	--ember-dim: #8a1d08;
+	--gold: #f7ba14;
+	--gold-dim: #b0850e;
+	--ink: #f4ecf1;
+	--ink-dim: #c4aebb;
+	--line: rgba(247, 186, 20, 0.22);
+	--card: rgba(20, 2, 14, 0.62);
+	--pixel: "Press Start 2P", "Silkscreen", monospace;
+	--pixel-alt: "Silkscreen", "Press Start 2P", monospace;
+	--body: "Space Grotesk", system-ui, sans-serif;
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+	margin: 0;
+	color: var(--ink);
+	background: var(--bg-0);
+	font: 17px/1.6 var(--body);
+	overflow-x: hidden;
+}
+/* the menu's fog: purple sky fading into an ember-lit floor */
+.sky {
+	position: fixed; inset: 0; z-index: -2;
+	background:
+		radial-gradient(ellipse 60% 45% at 50% 0%, rgba(160, 20, 70, 0.55), transparent 70%),
+		linear-gradient(180deg, var(--bg-2) 0%, var(--bg-1) 45%, var(--bg-0) 100%);
+}
+.floor {
+	position: fixed; left: -50%; right: -50%; bottom: -10vh; height: 55vh; z-index: -1;
+	background:
+		repeating-linear-gradient(90deg, rgba(255, 90, 31, 0.35) 0 2px, transparent 2px 120px),
+		repeating-linear-gradient(0deg, rgba(255, 90, 31, 0.28) 0 2px, transparent 2px 90px);
+	transform: perspective(500px) rotateX(62deg);
+	transform-origin: bottom;
+	mask-image: linear-gradient(to top, black 10%, transparent 85%);
+	-webkit-mask-image: linear-gradient(to top, black 10%, transparent 85%);
+	animation: drift 9s linear infinite;
+	opacity: 0.55;
+}
+@keyframes drift { to { background-position: 0 90px, 0 90px; } }
+@media (prefers-reduced-motion: reduce) { .floor { animation: none; } }
+
+a { color: var(--gold); }
+.wrap { max-width: 1060px; margin: 0 auto; padding: 0 20px; }
+
+nav {
+	display: flex; align-items: center; justify-content: space-between; gap: 16px;
+	padding: 18px 0;
+}
+.brand { font: 12px/1 var(--pixel); color: var(--gold); text-decoration: none; letter-spacing: 1px; }
+nav .links { display: flex; gap: 18px; font: 14px var(--pixel-alt); }
+nav .links a { color: var(--ink-dim); text-decoration: none; }
+nav .links a:hover { color: var(--gold); }
+
+.hero { text-align: center; padding: 34px 0 20px; }
+.kicker {
+	display: inline-block; font: 12px var(--pixel-alt); color: var(--ink-dim);
+	border: 1px solid var(--line); padding: 6px 12px; margin-bottom: 22px;
+}
+h1 {
+	font: clamp(28px, 6.4vw, 64px)/1.15 var(--pixel);
+	color: var(--gold); margin: 0 0 6px;
+	text-shadow: 0 4px 0 var(--ember-dim), 0 0 40px rgba(247, 186, 20, 0.25);
+}
+h1 .sub { display: block; color: var(--ink); font-size: 0.5em; margin-top: 18px; text-shadow: 0 3px 0 #000; }
+.tagline { max-width: 620px; margin: 22px auto 30px; color: var(--ink-dim); font-size: 19px; }
+
+.screen {
+	margin: 0 auto 34px; max-width: 820px; padding: 10px;
+	background: #000; border: 2px solid var(--gold-dim);
+	box-shadow: 0 0 0 6px rgba(0, 0, 0, 0.35), 0 30px 80px rgba(255, 90, 31, 0.25);
+	image-rendering: pixelated;
+}
+.screen img { display: block; width: 100%; height: auto; }
+
+.cta { display: flex; flex-wrap: wrap; justify-content: center; gap: 14px; align-items: center; }
+.btn {
+	display: inline-flex; align-items: center; gap: 12px;
+	font: 16px/1 var(--pixel); text-decoration: none; cursor: pointer;
+	padding: 18px 26px; border: 0;
+	color: #1a0610; background: var(--gold);
+	box-shadow: 0 6px 0 var(--gold-dim), 0 10px 30px rgba(247, 186, 20, 0.3);
+	transition: transform 0.08s ease, box-shadow 0.08s ease, background 0.15s;
+}
+.btn:hover { background: #ffd34a; transform: translateY(-2px); box-shadow: 0 8px 0 var(--gold-dim), 0 14px 34px rgba(247, 186, 20, 0.4); }
+.btn:active { transform: translateY(4px); box-shadow: 0 2px 0 var(--gold-dim); }
+.btn.ghost { background: transparent; color: var(--ink); box-shadow: inset 0 0 0 2px var(--ink-dim); font-size: 13px; padding: 16px 20px; }
+.btn.ghost:hover { color: var(--gold); box-shadow: inset 0 0 0 2px var(--gold); transform: none; }
+.btn svg { width: 18px; height: 18px; flex: none; }
+.meta { margin-top: 14px; font: 13px var(--pixel-alt); color: var(--ink-dim); min-height: 1.4em; }
+.meta b { color: var(--ink); font-weight: normal; }
+
+section { padding: 64px 0 8px; }
+h2 {
+	font: clamp(18px, 3vw, 26px)/1.3 var(--pixel); color: var(--gold);
+	margin: 0 0 28px; display: flex; align-items: center; gap: 14px;
+}
+h2::after { content: ""; flex: 1; height: 2px; background: linear-gradient(90deg, var(--line), transparent); }
+
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 16px; }
+.card {
+	background: var(--card); border: 1px solid var(--line); padding: 20px 20px 18px;
+	backdrop-filter: blur(4px);
+}
+.card h3 { font: 13px/1.5 var(--pixel); color: var(--ink); margin: 0 0 10px; }
+.card p { margin: 0; color: var(--ink-dim); font-size: 15.5px; }
+.card .ico { font: 22px var(--pixel); color: var(--ember); display: block; margin-bottom: 12px; }
+
+ol.steps { list-style: none; padding: 0; margin: 0; counter-reset: s; display: grid; gap: 14px; }
+ol.steps li {
+	counter-increment: s; position: relative;
+	background: var(--card); border: 1px solid var(--line);
+	padding: 18px 20px 18px 78px; min-height: 64px;
+}
+ol.steps li::before {
+	content: counter(s); position: absolute; left: 18px; top: 16px;
+	width: 40px; height: 40px; display: grid; place-items: center;
+	font: 16px var(--pixel); color: #1a0610; background: var(--gold); box-shadow: 0 4px 0 var(--gold-dim);
+}
+ol.steps b { color: var(--ink); }
+ol.steps span { color: var(--ink-dim); }
+kbd, code {
+	font: 13px var(--pixel-alt); background: rgba(0, 0, 0, 0.45); color: var(--gold);
+	border: 1px solid var(--line); padding: 2px 6px;
+}
+kbd { white-space: nowrap; }
+code { overflow-wrap: anywhere; }
+
+.two { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
+.two .card h3 { color: var(--gold); }
+.flow { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 6px 0 12px; }
+.flow span { font: 12px var(--pixel-alt); background: rgba(0, 0, 0, 0.45); border: 1px solid var(--line); padding: 6px 9px; color: var(--ink); }
+.flow i { color: var(--ember); font-style: normal; }
+
+details {
+	background: var(--card); border: 1px solid var(--line); margin-bottom: 10px;
+}
+summary {
+	cursor: pointer; padding: 16px 20px; font: 12px/1.6 var(--pixel); color: var(--ink);
+	list-style: none; display: flex; justify-content: space-between; gap: 12px;
+}
+summary::-webkit-details-marker { display: none; }
+summary::after { content: "+"; color: var(--gold); }
+details[open] summary::after { content: "-"; }
+details p { margin: 0; padding: 0 20px 18px; color: var(--ink-dim); }
+
+.notice {
+	margin-top: 70px; padding: 22px 24px; border: 1px dashed rgba(255, 90, 31, 0.5);
+	background: rgba(40, 4, 10, 0.6); color: var(--ink-dim); font-size: 15px;
+}
+.notice strong { color: var(--ink); }
+footer { padding: 34px 0 60px; text-align: center; font: 12px var(--pixel-alt); color: var(--ink-dim); }
+footer a { color: var(--ink-dim); }
+
+@media (max-width: 640px) {
+	nav .links { display: none; }
+	ol.steps li { padding-left: 70px; }
+	.btn { font-size: 13px; padding: 16px 18px; }
+}
+</style>
+</head>
+<body>
+<div class="sky"></div>
+<div class="floor"></div>
+
+<div class="wrap">
+	<nav>
+		<a class="brand" href="#">PITT MP</a>
+		<div class="links">
+			<a href="#features">Features</a>
+			<a href="#install">Install</a>
+			<a href="#play">Play</a>
+			<a href="#faq">FAQ</a>
+			<a href="https://github.com/StephenSHorton/pitt-multiplayer">GitHub</a>
+		</div>
+	</nav>
+
+	<header class="hero">
+		<div class="kicker">Unofficial mod &middot; Project P.I.T.T. v1.0.8 &middot; Steam</div>
+		<h1>PITT<span class="sub">Multiplayer</span></h1>
+		<p class="tagline">Steam co-op for Project P.I.T.T. Host a lobby, pull your friends in, and run the whole factory together in one shared world.</p>
+
+		<div class="screen"><img src="media/pitt-coop.gif" width="800" height="299" alt="The Project P.I.T.T. main menu with the mod's Multiplayer button under Play"></div>
+
+		<div class="cta">
+			<a class="btn" id="dl" href="https://github.com/StephenSHorton/pitt-multiplayer/releases">
+				<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M7 1h2v7h3l-4 5-4-5h3zM2 13h12v2H2z"/></svg>
+				<span id="dl-label">Download</span>
+			</a>
+			<a class="btn ghost" href="#install">How to install</a>
+		</div>
+		<div class="meta" id="dl-meta">Windows &middot; requires Project P.I.T.T. on Steam</div>
+	</header>
+
+	<section id="features">
+		<h2>What you get</h2>
+		<div class="grid">
+			<div class="card"><span class="ico">&#9632;&#9632;</span><h3>Friends-only lobbies</h3><p>Host from the main menu. Only your Steam friends can see your lobby. Up to 10 players.</p></div>
+			<div class="card"><span class="ico">&#9650;</span><h3>One shared world</h3><p>The host runs the factory. Ducks, products, crates, machines and tools are the same for everyone.</p></div>
+			<div class="card"><span class="ico">&#9679;</span><h3>Grab &amp; throw</h3><p>Picking things up feels instant. Whoever is holding an object owns it until they let go.</p></div>
+			<div class="card"><span class="ico">$</span><h3>Shared progress</h3><p>One wallet, one phase, one set of unlocks. Buy an upgrade and the whole crew has it.</p></div>
+			<div class="card"><span class="ico">&#8594;</span><h3>Late join</h3><p>Friends can hop into a game already in progress and get the host's current world.</p></div>
+			<div class="card"><span class="ico">&#10003;</span><h3>Feels native</h3><p>Built into the game's own menus and style. Your game files and saves are never modified.</p></div>
+		</div>
+	</section>
+
+	<section id="install">
+		<h2>Install</h2>
+		<ol class="steps">
+			<li><b>Close Project P.I.T.T.</b> <span>The installer won't run while the game is open.</span></li>
+			<li><b>Download the zip</b> <span>from the button above and unzip it anywhere, like your Desktop.</span></li>
+			<li><b>Double-click <code>Install.bat</code></b> <span>It finds the game through Steam on any drive. If Windows SmartScreen pops up, choose <kbd>More info</kbd> then <kbd>Run anyway</kbd>.</span></li>
+			<li><b>Launch the game from Steam</b> <span>as usual. A <b>Multiplayer</b> button now sits under Play.</span></li>
+		</ol>
+		<p class="meta" style="text-align:left">Everyone in a lobby needs the <b>same mod version</b>. Lobbies on a different version show up greyed out.</p>
+	</section>
+
+	<section id="play">
+		<h2>Play together</h2>
+		<div class="two">
+			<div class="card">
+				<h3>Hosting</h3>
+				<div class="flow"><span>Multiplayer</span><i>&#9656;</i><span>Host</span><i>&#9656;</i><span>Start</span></div>
+				<p>Your lobby shows everyone who joined. Use <b>Invite friends</b> to send Steam invites, then press <b>Start</b> when the crew is in. Saves stay on the host's PC.</p>
+			</div>
+			<div class="card">
+				<h3>Joining</h3>
+				<div class="flow"><span>Multiplayer</span><i>&#9656;</i><span>Join</span><i>&#9656;</i><span>pick a lobby</span></div>
+				<p>The list shows your friends' open lobbies and how many players are in each. You can also accept a Steam invite or click <b>Join Game</b> on a friend in Steam.</p>
+			</div>
+		</div>
+	</section>
+
+	<section id="faq">
+		<h2>FAQ</h2>
+		<details><summary>How do I uninstall it?</summary><p>Double-click <code>Uninstall.bat</code> in the folder you unzipped. It removes only what the installer added and restores anything it changed.</p></details>
+		<details><summary>Will it touch my saves?</summary><p>No. The mod never writes the game's save files. In multiplayer, only the host's game saves the world.</p></details>
+		<details><summary>Does "Verify integrity of game files" remove it?</summary><p>No, Steam leaves the mod's files alone. To remove the mod, use <code>Uninstall.bat</code>.</p></details>
+		<details><summary>Something broke. What do I send?</summary><p>Open an issue on GitHub and attach your log: <code>%APPDATA%\Godot\app_userdata\Project P.I.T.T\pittapi\pittapi.log</code></p></details>
+		<details><summary>Do my friends need the mod too?</summary><p>Yes. Everyone needs the same version installed, and everyone needs to own Project P.I.T.T. on Steam.</p></details>
+	</section>
+
+	<div class="notice">
+		<strong>Unofficial and AI-assisted.</strong> This mod was written with AI assistance (Anthropic's Claude) and is not affiliated with or endorsed by Froke, the developer of Project P.I.T.T. The official P.I.T.T. community doesn't accept fully AI-generated mods, so please don't post or promote this mod in its official spaces. Please report bugs on GitHub, not to the developer. The mod contains none of the game's code or asset files; you need your own copy of the game on Steam.
+	</div>
+
+	<footer>
+		<a href="https://github.com/StephenSHorton/pitt-multiplayer">Source on GitHub</a> &middot;
+		<a href="https://github.com/StephenSHorton/pitt-multiplayer/releases">All releases</a> &middot;
+		<a href="https://github.com/StephenSHorton/pitt-multiplayer/issues">Report a bug</a> &middot; MIT licensed
+	</footer>
+</div>
+
+<script>
+// Point the button at the newest release zip (pre-releases included). Falls back to the Releases page.
+(async () => {
+	const label = document.getElementById("dl-label");
+	const meta = document.getElementById("dl-meta");
+	const link = document.getElementById("dl");
+	try {
+		const r = await fetch("https://api.github.com/repos/StephenSHorton/pitt-multiplayer/releases?per_page=10");
+		if (!r.ok) return;
+		const rel = (await r.json()).find(x => !x.draft && x.assets.some(a => a.name.endsWith(".zip")));
+		if (!rel) return;
+		const zip = rel.assets.find(a => a.name.endsWith(".zip"));
+		link.href = zip.browser_download_url;
+		label.textContent = "Download " + rel.tag_name;
+		const kb = Math.round(zip.size / 1024);
+		const date = new Date(rel.published_at).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+		meta.innerHTML = `<b>${zip.name}</b> &middot; ${kb} KB &middot; ${date}${rel.prerelease ? " &middot; pre-release" : ""} &middot; Windows`;
+	} catch (e) { /* keep the Releases-page fallback */ }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,9 @@
+{
+  "id": "_PittAPIBrokenFixture",
+  "name": "PittAPI broken fixture",
+  "version": "1.0.0",
+  "api_version": "^1.0",
+  "entry": "main.gd",
+  "multiplayer": "local_only",
+  "description": "Deliberately broken (parse error). Installed only with -WithTests; the boot suite expects it FAILED."
+}

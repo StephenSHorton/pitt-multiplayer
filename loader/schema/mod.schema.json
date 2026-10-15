@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "pittapi/mod.schema.json",
+  "title": "PittAPI mod manifest (mod.json)",
+  "type": "object",
+  "required": ["id", "name", "version", "api_version"],
+  "additionalProperties": true,
+  "properties": {
+    "$schema": {"type": "string"},
+    "id": {"type": "string", "pattern": "^_?[A-Za-z][A-Za-z0-9_]{1,63}$", "description": "Must equal the folder name. A leading underscore marks a test-only fixture (skipped unless a test run is armed)."},
+    "name": {"type": "string", "minLength": 1},
+    "version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]+)?(\\+[0-9A-Za-z.-]+)?$"},
+    "api_version": {"type": "string", "minLength": 1, "description": "Semver range for PittAPI, e.g. ^1.0"},
+    "entry": {"type": "string", "pattern": "^[^:]+\\.gd$", "default": "main.gd"},
+    "dependencies": {"type": "object", "propertyNames": {"pattern": "^_?[A-Za-z][A-Za-z0-9_]{1,63}$"}, "additionalProperties": {"type": "string"}},
+    "optional_dependencies": {"type": "object", "propertyNames": {"pattern": "^_?[A-Za-z][A-Za-z0-9_]{1,63}$"}, "additionalProperties": {"type": "string"}},
+    "load_order": {"type": "integer", "default": 100},
+    "extensions": {"type": "array", "items": {"type": "string", "pattern": "^[^:]+\\.gd$"}},
+    "game_versions": {"type": "array", "items": {"type": "string"}},
+    "multiplayer": {"enum": ["client_required", "host_only", "local_only"], "default": "local_only"},
+    "enabled": {"type": "boolean", "default": true},
+    "description": {"type": "string"},
+    "author": {"type": "string"},
+    "core": {"type": "boolean"},
+    "provides": {"type": "array", "items": {"enum": ["net"]}, "uniqueItems": true, "description": "Core services this mod provides. 'net': the multiplayer layer (api.net provider calls); only one active mod may provide it."}
+  }
+}

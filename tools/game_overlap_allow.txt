@@ -1,0 +1,27 @@
+# Generic Godot idioms allowed by tools/check_game_code_overlap.py.
+# Only add lines with no game-specific names or logic.
+process_mode = Node.PROCESS_MODE_ALWAYS
+await get_tree().process_frame
+await RenderingServer.frame_post_draw
+get_viewport().set_input_as_handled()
+get_tree().paused = false
+if FileAccess.file_exists(p):
+if not FileAccess.file_exists(path):
+DirAccess.remove_absolute(p)
+if obj == null or not is_instance_valid(obj):
+if not is_instance_valid(obj):
+if is_instance_valid(body):
+if is_instance_valid(row):
+if InputMap.has_action(action):
+if not InputMap.has_action(action):
+InputMap.add_action(action)
+InputMap.action_erase_events(action)
+while not stack.is_empty():
+if not pending.is_empty():
+if what == NOTIFICATION_TRANSLATION_CHANGED:
+TYPE_PACKED_VECTOR3_ARRAY:
+center.set_anchors_preset(Control.PRESET_FULL_RECT)
+panel.add_theme_stylebox_override("panel", sb)
+mat.emission_enabled = true
+label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_WINDOWED)

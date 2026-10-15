@@ -1,0 +1,7 @@
+{
+  "MP_PHYSICS_OVERLOADED": "物理运算过载：其他玩家收到的物体更新会减少",
+  "MP_ERR_WORLD_TOO_BIG": "世界太大，无法发送给新玩家",
+  "MP_ERR_WORLD_SEND": "无法把世界发送给新玩家，请重试",
+  "MP_WORLD_LOADING": "正在加载共享世界……",
+  "MP_HELD_BY": "{name} 正拿着"
+}
