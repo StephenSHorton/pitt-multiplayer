@@ -14,6 +14,7 @@ const GameplayHost = preload("gameplay_host.gd")
 const GameplayClient = preload("gameplay_client.gd")
 const GrabHost = preload("grab_host.gd")
 const GrabClient = preload("grab_client.gd")
+const Dispenser = preload("dispenser.gd")
 const GAMEPLAY_IDS := ["P8", "P2", "P3", "P12", "P10", "P11", "P1"]
 const GRAB_IDS := ["G1", "G3", "G2", "G4", "G6"]    # G5 (leaves the session) runs after the end checks
 
@@ -37,6 +38,8 @@ func run() -> void:
 		if wants("V1"):
 			await _v1_host()
 		await _sub(GameplayHost).run_gameplay(_ids(GAMEPLAY_IDS))
+		if wants("D1"):
+			await _sub(Dispenser).run_host()
 		# the host spawns the test bodies at the client's avatar: wait until it stands still
 		await wait_peer_mark("client_positioned_grab", 120.0)
 		await sleep_ms(500)
@@ -68,6 +71,8 @@ func run() -> void:
 		if wants("V1"):
 			await _v1_client()
 		await _sub(GameplayClient).run_gameplay(_ids(GAMEPLAY_IDS))
+		if wants("D1"):
+			await _sub(Dispenser).run_client()
 		# P10 and P1 each end a combo: the mirrored combo_ended reaches hud.show_result, which
 		# pays the bonus out locally (GameState.add_bonus); the money clamp reverts it in the
 		# same frame (MP2 P5; the host pays once)

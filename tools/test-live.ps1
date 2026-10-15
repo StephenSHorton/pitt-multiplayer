@@ -6,7 +6,7 @@
   2. installs PittAPI with -WithTests (unless -NoInstall)
   3. writes the one-shot flag user://pittapi/autotest.flag, deletes the old report,
      and hashes every savegame*, sandbox.save* and profile.cfg in user://
-  4. launches through steam://rungameid/4026250 (restartAppIfNecessary needs Steam)
+  4. starts projectpitt.exe with SteamAppId set (Start-Game; Steam must be running)
   5. waits for user://pittapi/test_report.json with "finished": true
   6. kills projectpitt.exe if it is still running 10 s after the report (or on timeout)
   7. re-hashes the save files: ANY change fails the run
@@ -62,7 +62,7 @@ foreach ($k in $before.Keys) { Write-Host "    $k $($before[$k].Substring(0,16))
 if ($before.Count -eq 0) { Write-Host '    (no save files yet)' }
 
 Write-Step "Launching through Steam (run $runId, suites: $($Suites -join ','))"
-Start-Process "steam://rungameid/$($script:PittAppId)"
+Start-Game $GameDir
 $deadline = (Get-Date).AddSeconds($TimeoutSec)
 $finished = $false
 $lastCount = -1

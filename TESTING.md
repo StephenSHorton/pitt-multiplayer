@@ -81,6 +81,7 @@ stat counters, unlock detach and snapshot collectors are exercised too. Helpers:
 | `test_mp_net_guards` | pause guard (same physics frame) + local freeze, InputMap erase / re-erase / restore (R15/R16), `pause_menu_ext`, puppets without groups / bodies / `PlayerController` name (R1), avatars both ways, relay, interpolation, time_scale 0 (R5), loss |
 | `test_mp_net_achievements` | presence baseline grants nothing on join, a crossing fires once, `none`, cheat broadcast (R17), cache restored |
 | `test_mp_net_two_process` | a second headless Godot (`--pittapi-instance=peer2`) over real ENet: mods mismatch rejected, snapshot join, command round trip, econ, avatars both ways, host leave |
+| `test_mp_net_steam_lanes` | under the GodotSteam 4.19.1 lane limit every logical channel (0-3) still arrives as itself both ways (channel 3 shares lane 1 with a one-byte tag); bad tags refused |
 | `test_mp_net_contract` | interface contract 5.4 for `net/session.gd` **and** the UI stream's `fakes/mp_ui/fake_session.gd`; composition in `main.gd` |
 
 ### Two-instance ENet loopback (`tools/test-mp-loopback.ps1`)
@@ -106,9 +107,15 @@ Two decomp editor instances on one PC (one Steam account cannot P2P to itself, s
 5. Output: `dist\mp-loopback-report.json` (both reports + failures), instance logs in `dist\mp-dev\`.
 
 Options: `-Headless` (console exe, no windows), `-KeepOpen`, `-TimeoutS`, `-Port`. `-HostLive`: the host is
-the real game (`install.ps1 -WithTests -WithMP`, `steam://rungameid/4026250`; only stages allowed to launch
-the game), the client the decomp instance; the real `PittMultiplayer.cfg` is restored and `projectpitt.exe`
-is killed afterwards. `-Suite mp1` (default) runs this MP1 scenario, `-Suite mp2` the MP2 harness below,
+the real game (`install.ps1 -WithTests -WithMP`; only stages allowed to launch the game), the client the
+decomp instance; the real `PittMultiplayer.cfg` is restored and `projectpitt.exe` is killed afterwards.
+`-ClientLive`: the reverse, the shipped release build is the CLIENT and the decomp instance the host (the
+real game starts first: while a decomp instance runs, Steam treats app 4026250 as running). The live
+scripts start `projectpitt.exe` directly with `SteamAppId`/`SteamGameId` set (Steam must be running), so
+the game's `restartAppIfNecessary` does not go through Steam's launch-option dialog.
+`-SteamLanes 4`: every ENet transport emulates the bundled GodotSteam 4.19.1 lane limit (a channel
+>= `max_channels - 1` is sent on lane 0), the bug of the first two-PC Steam test (0.2.0: channel 3 was
+dropped, so clients saw no new spawns and none of their interactions reached the host). `-Suite mp1` (default) runs this MP1 scenario, `-Suite mp2` the MP2 harness below,
 `-Suite all` both (two runs; the MP1 report is kept as `dist\mp-loopback-report.mp1.json`).
 
 ### MP2 shared world: headless BODIES suites (`test_mp2_bodies_*`)
@@ -148,6 +155,8 @@ files run in order. BODIES (`mp2/bodies_host.gd`, `mp2/bodies_client.gd`):
 | B5 | downstream to the client during B1: p95 of 1 s windows <= budget x 1.1 |
 | B2 | 20 recycled -> gone on the client; same-frame recycle + respawn -> new eid on both, no leftover |
 | B7 | a client-local `add_money` reverted within a frame and counted; `PittMultiplayer.contribute` unknown |
+| D1 | the host holds LMB at the manual duck workbench (the game's own `interact_ray` -> `workbench.craft_item` spawn): the client sees the duck with the host eid within 1.5 s |
+| D2 | the client holds LMB at its copy of the bench: the forwarded craft makes a duck on the host, the client sees it, no local craft; releasing stops the host's bench |
 | end | client: no unexpected strays, orphan frames <= 1 %, local money writes only where expected, 60 Hz |
 
 ## Live (`tools/test-live.ps1`)

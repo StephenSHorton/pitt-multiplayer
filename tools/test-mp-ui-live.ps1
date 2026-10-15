@@ -6,7 +6,7 @@
   2. installs PittAPI + PittMultiplayer + PittMPTests (-WithMP -WithTests)
   3. arms <user>\pittapi\mp_autotest.flag with role "ui_live" (PittMPTests/scenario_ui_live.gd)
      and forces transport=steam in PittMultiplayer.cfg (backed up and restored)
-  4. hashes the save files, launches steam://rungameid/4026250
+  4. hashes the save files, starts the game (Start-Game: projectpitt.exe with SteamAppId set)
   5. waits for the report (dist\mp-ui-live-report.json), kills projectpitt.exe
   6. re-hashes: any save change fails the run. Screens: dist\screens\live-*.png
   The scenario never enters a world, so no save is ever loaded or written.
@@ -52,8 +52,8 @@ Write-Step 'Hashing save files (they must not change)'
 $before = Get-SaveHashes $user
 Write-Ok "$($before.Count) save files"
 
-Write-Step "Launching the game (steam://rungameid/$($script:PittAppId))"
-Start-Process "steam://rungameid/$($script:PittAppId)"
+Write-Step "Launching the game"
+Start-Game $GameDir
 $t0 = Get-Date
 $done = $null
 while (((Get-Date) - $t0).TotalSeconds -lt $TimeoutSec) {

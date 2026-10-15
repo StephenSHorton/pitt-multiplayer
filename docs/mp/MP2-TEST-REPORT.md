@@ -1,5 +1,58 @@
 # MP2 test report (2026-10-15)
 
+## 0.2.1: the first two-PC Steam test (client could not interact, saw no new ducks)
+
+**Report.** v0.2.0 over real Steam: the client joined (handshake, save snapshot and world
+snapshot all arrived, host log "peer ... is in the world"), then saw no duck the host made
+and none of its interactions did anything. Nothing else in either log.
+
+**Root cause.** The bundled GodotSteam (4.19.1, `libgodotsteam.windows.template_release`)
+maps channels to Steam connection lanes and its `SteamPacketPeer::send` has an off-by-one:
+`if (p_channel >= configured_lanes - 1) p_channel = 0` ("Defaulting to channel 0"). The game
+sets `steam/multiplayer_peer/max_channels=4`, so lanes 0-2 work and channel 3 (`CH_WORLD`:
+`ents`, `meta`, `own*`, `interact`, `tool_in`, `fx`) was sent on lane 0. The receiver's
+validator then saw world kinds on the control channel and dropped them
+(`kind_not_allowed`), silently (drops went only to the in-memory ring). Snapshots (ch1),
+control (ch0) and body frames (ch2) were fine: the client had every object that existed at
+the join, moving, but no later spawn, and the host never got an `interact` or `own_req`.
+Every earlier test used ENet, where all four channels exist. The release-build client was
+not the cause: the real game as client over ENet passed every check (`-ClientLive`, before
+any fix: host 92/92, client 93/93).
+
+**Fix.** `net/transport.gd` maps logical channels onto lanes 0-2: `CH_WORLD` shares lane 1
+with `CH_BULK`, and every lane-1 packet carries a one-byte logical channel (ch0 / ch2 are
+unchanged on the wire). ENet uses the same mapping, so every loopback run exercises it.
+`dev_lane_cap=4` (`test-mp-loopback.ps1 -SteamLanes 4`) makes ENet reproduce GodotSteam's
+lane limit. Version 0.2.1 (mods_hash differs, so 0.2.0 and 0.2.1 never share a session).
+
+**Before / after** (same checks; "before" = 0.2.0 transport under the emulated lane limit):
+
+| Run | Before | After |
+|---|---|---|
+| headless `test_mp_net_steam_lanes` | channels received `[0, 0, 1, 2]` both ways (ch3 arrives as ch0): FAIL | `[0, 1, 2, 3]`: PASS (headless 426 / 0) |
+| `-Suite mp2 -SteamLanes 4`, decomp x2 | host 72 of 84 passed, client 59 of 81: B1 "0 of 50 puppets", P2/P3/P12 nothing reached the host, G1-G6 no puppet; client drops `kind_not_allowed` 35 | host 98/98, client 99/99 |
+| `-Scenario D1 -SteamLanes 4 -ClientLive` (real game client) | D1 `d1_client_sees_host_duck` FAIL (`world_rx 0`), D2 `d2_host_bench_crafted_for_client` FAIL (0 ducks), `d2_client_sees_its_crafted_duck` FAIL | full mp2: host 98/98, client 99/99; D1 duck seen at once (0 ms after the mark), D2 duck crafted on the host for the client, bench stops on release |
+
+New log lines in the "before" run pinpoint it on both sides:
+`protocol drop kind_not_allowed:ents (kind ents, peer 1, role client): first of its kind`,
+`protocol drop kind_not_allowed:interact (kind interact, peer ..., role host)`, and the
+10 s stats line shows `ch3 tx 34/3274B` on the host while the client has `ch3 ... rx 0/0B`.
+
+**Final runs (0.2.1):** headless 426 passed / 0 failed; `-Suite all` decomp (MP1 host 38/38,
+client 34/34; MP2 host 98/98, client 99/99); `-Suite mp2 -SteamLanes 4` decomp 98/98, 99/99;
+`-HostLive -SteamLanes 4` 98/98, 99/99; `-ClientLive -SteamLanes 4` 98/98, 99/99 (B6 moving
+p95 16.9 cm, rest 0.7 mm, 0 strays, 0 orphan frames of 198 626 records); `test-mp-ui-live.ps1`
+PASSED. Real save folder unchanged in every run. Still only checkable over real Steam: that
+GodotSteam delivers lane 1 with the tag (manual test 15.12), fragmentation (15.9).
+
+New harness pieces: `-ClientLive` (the shipped release build as client), `-SteamLanes`,
+D1/D2 (the manual duck workbench driven through `interact_ray` with a held LMB on each
+side), diagnostics (README "Diagnostics").
+
+---
+
+## MP2 integration
+
 Integration of the three MP2 streams of `docs/mp/MP2-DESIGN.md` (BODIES `68bbdb8`,
 GAMEPLAY `c7c73c6`/`e47805c`, GRAB `9fd90af`), followed by real runs on this PC (one
 Steam account, so every multi-instance run is ENet on 127.0.0.1). Every number below is

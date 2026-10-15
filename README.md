@@ -227,7 +227,7 @@ co-op state owned by the host; grabs are predicted and handed over (design `docs
 `docs/mp/MP2-TEST-REPORT.md`). Player guide, settings and limitations:
 [`mods/PittMultiplayer/README.md`](mods/PittMultiplayer/README.md).
 Tests: headless `test_mp_*` / `test_mp2_*`, two or three instances on one PC
-(`tools\test-mp-loopback.ps1 -Suite mp1|mp2|all [-Clients 2] [-HostLive]`), and the manual Steam checklist
+(`tools\test-mp-loopback.ps1 -Suite mp1|mp2|all [-Clients 2] [-HostLive | -ClientLive] [-SteamLanes 4]`), and the manual Steam checklist
 [`docs/mp/MANUAL-STEAM-TEST.md`](docs/mp/MANUAL-STEAM-TEST.md).
 
 PittAPI 1.1 additions it relies on (usable by any mod):

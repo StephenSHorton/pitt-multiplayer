@@ -145,6 +145,8 @@ func shot(name: String) -> void:
 	var who := String(flag.get("side", "")) if String(flag.get("role", "")) == "mp2" else String(flag.get("role", "x"))
 	if bool(flag.get("host_live", false)) and who == "host":
 		who = "livehost"
+	elif bool(flag.get("client_live", false)) and who == "client":
+		who = "liveclient"
 	var p := dir.path_join("loop-%s-%s.png" % [who, name])
 	var err := img.save_png(p)
 	report.value("shot_" + name, p if err == OK else "error %d" % err)

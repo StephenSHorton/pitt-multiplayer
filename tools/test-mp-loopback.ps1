@@ -16,14 +16,19 @@
   save folder (%APPDATA%\Godot\app_userdata\Project P.I.T.T) is SHA-256-hashed
   before and after; any change fails the run.
 
-  -HostLive: the HOST is the real game (steam://rungameid/4026250, installed with
+  -HostLive: the HOST is the real game (Start-Game, installed with
   -WithMP -WithTests; only stages allowed to launch the game may use it), the
   client is the decomp instance. The real game's PittMultiplayer.cfg is backed up
   and restored; projectpitt.exe is killed afterwards.
+
+  -ClientLive: the reverse. The HOST is the decomp instance, the CLIENT is the real
+  game (a release export: no asserts, VM script errors not reported). Same install,
+  config backup and kill as -HostLive. Refuses to start while projectpitt.exe runs.
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File tools\test-mp-loopback.ps1
   powershell -ExecutionPolicy Bypass -File tools\test-mp-loopback.ps1 -Setup -Headless
   powershell -ExecutionPolicy Bypass -File tools\test-mp-loopback.ps1 -HostLive
+  powershell -ExecutionPolicy Bypass -File tools\test-mp-loopback.ps1 -Suite mp2 -ClientLive
   powershell -ExecutionPolicy Bypass -File tools\test-mp-loopback.ps1 -Suite mp2
   powershell -ExecutionPolicy Bypass -File tools\test-mp-loopback.ps1 -Suite mp2 -Scenario B1
 .PARAMETER Suite
@@ -34,6 +39,9 @@
   mp2 only: 2 adds a third instance (side "client2", PittAPI root pittapi-client2) that joins
   after the first client (a late join into a 3-player session), checks the B-scenarios from a
   third peer and both other avatars, then runs the end checks.
+.PARAMETER SteamLanes
+  4 = every instance's ENet transport emulates the bundled GodotSteam 4.19.1 lane limit
+  (channels >= max_channels - 1 are sent on lane 0), the bug the first two-PC Steam test hit.
 .PARAMETER Scenario
   mp2 only: run one scenario id (B1, B2, ...); the join and the end checks always run.
 #>
@@ -43,6 +51,8 @@ param(
     [switch]$Setup,
     [switch]$Headless,
     [switch]$HostLive,
+    [switch]$ClientLive,
+    [int]$SteamLanes = 0,
     [switch]$KeepOpen,
     [int]$LatencyMs = 100,
     [int]$JitterMs = 30,
@@ -75,6 +85,9 @@ $devUser = Get-DevUserDir
 $realUser = Get-UserDir
 $runId = (Get-Date -Format 'yyyyMMdd-HHmmss')
 $failures = @()
+if ($HostLive -and $ClientLive) { Write-Bad '-HostLive and -ClientLive exclude each other'; exit 1 }
+if ($ClientLive -and $Clients -ne 1) { Write-Bad '-ClientLive runs one client'; exit 1 }
+$live = [bool]($HostLive -or $ClientLive)
 
 # ---------------------------------------------------------------- setup + T0
 if ($Setup -or -not (Test-Path -LiteralPath (Join-Path $decomp 'override.cfg')) -or -not (Test-Path -LiteralPath (Join-Path $devDist 'mods\PittAPI\pittapi.gd'))) {
@@ -97,7 +110,7 @@ if (-not $probe.enet) { Write-Bad 'ENetMultiplayerPeer missing in this Godot bui
 # ---------------------------------------------------------------- save guard (before)
 Write-Step "Hashing the real save folder $realUser"
 $saveBefore = Get-SaveHashes $realUser
-$treeBefore = if ($HostLive) { @{} } else { Get-TreeHashes $realUser }
+$treeBefore = if ($live) { @{} } else { Get-TreeHashes $realUser }
 Write-Ok ("{0} save files, {1} files total" -f $saveBefore.Count, $treeBefore.Count)
 
 # ---------------------------------------------------------------- per-role config + flag
@@ -112,6 +125,7 @@ dev_port=$Port
 dev_targets="127.0.0.1:$Port"
 dev_name="$(if ($Role -eq 'host') { 'Host' } elseif ($Role -eq 'client2') { 'Client 2' } else { 'Client' })"
 achievements="none"
+dev_lane_cap=$SteamLanes
 "@
     Write-Utf8NoBom (Join-Path $PittRoot 'config\PittMultiplayer.cfg') ($cfg -replace "`r`n", "`n")
     if (Test-Path -LiteralPath $ReportPath) { Remove-Item -Force -LiteralPath $ReportPath }
@@ -119,6 +133,7 @@ achievements="none"
     $flag = [ordered]@{
         role = $flagRole; side = $Role; scenario = $Scenario; join_after = $JoinAfter; peer2_report = $Peer2Report
         host_live = [bool]($HostLive -and $Role -eq 'host')
+        client_live = [bool]($ClientLive -and $Role -eq 'client')
         run_id = $runId; timeout_s = $TimeoutS - 30; quit = (-not $KeepOpen)
         report = (ConvertTo-GodotPath $ReportPath); peer_report = (ConvertTo-GodotPath $PeerReport)
         address = '127.0.0.1'; port = $Port
@@ -128,18 +143,16 @@ achievements="none"
     Write-Utf8NoBom (Join-Path $PittRoot 'mp_autotest.flag') ($flag | ConvertTo-Json -Depth 4)
 }
 
-$clientRoot = Join-Path $devUser 'pittapi-client'
+$clientRoot = if ($ClientLive) { Join-Path $realUser 'pittapi' } else { Join-Path $devUser 'pittapi-client' }
 $clientReport = Join-Path $clientRoot 'mp_report.json'
-if ($HostLive) {
+$hostRoot = if ($HostLive) { Join-Path $realUser 'pittapi' } else { Join-Path $devUser 'pittapi-host' }
+if ($live) {
     if (Test-GameRunning) { Write-Bad 'projectpitt.exe is running; close it first'; exit 1 }
-    $hostRoot = Join-Path $realUser 'pittapi'
-    $cfgPath = Join-Path $hostRoot 'config\PittMultiplayer.cfg'
+    $cfgPath = Join-Path $realUser 'pittapi\config\PittMultiplayer.cfg'
     $cfgBackup = $null
     if (Test-Path -LiteralPath $cfgPath) { $cfgBackup = Get-Content -Raw -LiteralPath $cfgPath }
     Write-Step 'Installing PittAPI + PittMultiplayer + PittMPTests into the game'
     & powershell -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'install.ps1') -WithTests -WithMP | Out-Null
-} else {
-    $hostRoot = Join-Path $devUser 'pittapi-host'
 }
 $hostReport = Join-Path $hostRoot 'mp_report.json'
 $client2Root = Join-Path $devUser 'pittapi-client2'
@@ -162,9 +175,25 @@ function Start-DevInstance([string]$Role, [string]$Pos) {
 }
 
 $procs = @()
+if ($ClientLive) {
+    # the real game starts first (the decomp instance initialises Steamworks as app 4026250
+    # too, and Steam ignores steam://rungameid while it runs) and waits for the host's
+    # lobby_ready mark (its scenario allows 120 s).
+    Write-Step 'Launching the real game as client'
+    Start-Game
+    $tc = Get-Date
+    $clientUp = $false
+    while (((Get-Date) - $tc).TotalSeconds -lt 180) {
+        $cr = Read-JsonFile $clientReport
+        if ($cr -and $cr.run_id -eq $runId) { $clientUp = $true; break }
+        Start-Sleep -Milliseconds 500
+    }
+    if (-not $clientUp) { Write-Bad 'the real game never started its client scenario'; $failures += 'client:not_started' }
+    else { Write-Ok ("client scenario running after {0:n0} s" -f ((Get-Date) - $tc).TotalSeconds) }
+}
 if ($HostLive) {
-    Write-Step 'Launching the real game as host (steam://rungameid/4026250)'
-    Start-Process "steam://rungameid/$($script:PittAppId)"
+    Write-Step 'Launching the real game as host'
+    Start-Game
 } else {
     Write-Step "Launching host ($([IO.Path]::GetFileName($exe)))"
     $procs += Start-DevInstance 'host' '0,40'
@@ -180,8 +209,10 @@ while (((Get-Date) - $t0).TotalSeconds -lt 240) {
 if (-not $lobbyReady) { Write-Bad 'host never reported lobby_ready'; $failures += 'host:lobby_ready' }
 else {
     Write-Ok ("host lobby ready after {0:n0} s" -f ((Get-Date) - $t0).TotalSeconds)
-    Write-Step 'Launching client'
-    $procs += Start-DevInstance 'client' '970,40'
+    if (-not $ClientLive) {
+        Write-Step 'Launching client'
+        $procs += Start-DevInstance 'client' '970,40'
+    }
     if ($three) { Write-Step 'Launching client 2'; $procs += Start-DevInstance 'client2' '485,600' }
 }
 
@@ -197,14 +228,15 @@ while ((Get-Date) -lt $deadline -and $lobbyReady) {
     if ($line -ne $lastLine) { Write-Host "    $line"; $lastLine = $line }
     if ($h -and $h.finished -and $c -and $c.finished -and (-not $three -or ($c2 -and $c2.finished))) { break }
     $alive = @($procs | Where-Object { -not $_.HasExited })
-    if (-not $HostLive -and $alive.Count -eq 0) { break }
+    if (-not $live -and $alive.Count -eq 0) { break }
+    if ($ClientLive -and $alive.Count -eq 0 -and (((Get-Date) - $t0).TotalSeconds -gt 60) -and -not (Test-GameRunning)) { break }
     Start-Sleep -Seconds 1
 }
 
 # ---------------------------------------------------------------- stop
 Start-Sleep -Seconds 3
 foreach ($p in $procs) { if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue } }
-if ($HostLive) {
+if ($live) {
     Start-Sleep -Seconds 5
     Stop-Game
     if ($cfgBackup -ne $null) { Write-Utf8NoBom $cfgPath $cfgBackup } elseif (Test-Path -LiteralPath $cfgPath) { Remove-Item -Force -LiteralPath $cfgPath }
@@ -231,11 +263,11 @@ foreach ($pair in $pairs) {
 
 Write-Step 'Re-hashing the real save folder'
 $saveDiff = Compare-Hashes $saveBefore (Get-SaveHashes $realUser)
-$treeDiff = if ($HostLive) { @() } else { Compare-Hashes $treeBefore (Get-TreeHashes $realUser) }
+$treeDiff = if ($live) { @() } else { Compare-Hashes $treeBefore (Get-TreeHashes $realUser) }
 foreach ($d in ($saveDiff + $treeDiff)) { Write-Bad "real user dir $d"; $failures += "real-user-dir:$d" }
 if (($saveDiff + $treeDiff).Count -eq 0) { Write-Ok 'real save folder unchanged' }
 
-$combined = [ordered]@{ run_id = $runId; host_live = [bool]$HostLive; failures = $failures; host = $h; client = $c;
+$combined = [ordered]@{ run_id = $runId; host_live = [bool]$HostLive; client_live = [bool]$ClientLive; failures = $failures; host = $h; client = $c;
     real_user_dir_changes = ($saveDiff + $treeDiff) }
 $combined['suite'] = $Suite
 if ($three) { $combined['client2'] = $c2 }

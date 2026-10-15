@@ -180,9 +180,16 @@ this checks them over Steam between two real players.
     on both screens. B left-clicks an automatic duck machine: it switches on for both.
 11. **Clear items.** On B (not the host) the pause menu's Clear items says only the host
     can do it; on A it clears loose products for both players.
+12. **The 0.2.0 bug (lanes).** A holds left click at the manual duck workbench: B sees
+    the new duck pop out. B does the same at the bench: a duck appears on both screens.
+    B grabs it. In both `pittapi.log`s the `mp stats` lines show `ch3` traffic in both
+    directions (`ch3 tx N/..B rx M/..B` with N, M > 0 on the host and the client) and
+    `drops {}`; there is no `protocol drop kind_not_allowed:ents` (or `:interact`,
+    `:own_req`) WARN.
 
 ## Reporting
 
-Send `pittapi\pittapi.log` from both PCs and the PASS/FAIL list. After the test:
+Send `pittapi\pittapi.log` and `pittapi\mp_session_last.json` (written when a session
+ends or the game quits) from both PCs and the PASS/FAIL list. After the test:
 `tools\uninstall.ps1` (or keep it installed) and restore the save backups if anything
 looks wrong.

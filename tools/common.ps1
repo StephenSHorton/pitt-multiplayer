@@ -126,3 +126,17 @@ function Write-Utf8NoBom([string]$Path, [string]$Text) {
 }
 
 function ConvertTo-GodotPath([string]$p) { return ($p -replace '\\', '/') }
+
+# Starts the installed game. Directly with SteamAppId / SteamGameId set (Steam must be
+# running): restartAppIfNecessary then returns false, so no Steam launch-option dialog
+# can hold the start; falls back to steam://rungameid when the exe is not found.
+function Start-Game([string]$GameDir = '') {
+    try { $dir = Get-GameDir $GameDir } catch { $dir = $null }
+    if ($dir) {
+        $env:SteamAppId = $script:PittAppId
+        $env:SteamGameId = $script:PittAppId
+        Start-Process -FilePath (Join-Path $dir $script:PittExe) -WorkingDirectory $dir | Out-Null
+        return
+    }
+    Start-Process "steam://rungameid/$($script:PittAppId)"
+}
