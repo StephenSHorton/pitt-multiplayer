@@ -49,6 +49,11 @@ const FOLLOW_KEEP := 12
 ## a follower frame's time is the sender's spacing (held frame t_ms) laid over its
 ## arrival, at most this far past it (frames that arrive in bursts still play evenly)
 const FOLLOW_SPREAD_MS := 100
+## the follower steers toward the interpolated pose with bounded acceleration, so a
+## late burst of frames bends its path instead of jerking it (and what rests in it)
+const FOLLOW_MAX_ACCEL := 40.0     # m/s^2 (a hard lift reaches about 25)
+const FOLLOW_GAIN := 12.0          # 1/s, position error -> velocity
+const FOLLOW_SNAP_M := 1.0
 const ENTS_ROWS_PER_MSG := 200
 const META_ROWS_PER_MSG := 300
 const READY_RESEND_MS := 15000
@@ -84,6 +89,9 @@ class Ent extends RefCounted:
 	var meta_force := false
 	var follow_peer := 0
 	var follow: Array = []
+	var follow_has := false
+	var follow_out := Vector3.ZERO
+	var follow_v := Vector3.ZERO
 	var saved_freeze := false
 	var saved_mode := 0
 	var sleep_cb: Callable
@@ -439,6 +447,7 @@ func follow(eid: int, peer: int) -> void:
 		n.freeze = true
 	e.follow_peer = peer
 	e.follow.clear()
+	e.follow_has = false
 	_wake(e)
 
 
@@ -672,15 +681,31 @@ func _drive_followers(now: int) -> void:
 				break
 		var p: Vector3 = s0.p
 		var q: Quaternion = s0.q
+		var v: Vector3 = s0.get("l", Vector3.ZERO)
 		if s1 != s0 and int(s1.rx) > int(s0.rx):
 			var u := clampf(float(rt - int(s0.rx)) / float(int(s1.rx) - int(s0.rx)), 0.0, 1.0)
 			p = (s0.p as Vector3).lerp(s1.p, u)
 			q = (s0.q as Quaternion).slerp(s1.q, u)
+			v = (s1.p - s0.p) / (float(int(s1.rx) - int(s0.rx)) / 1000.0)
 		elif int(e.follow.back().rx) <= rt:
 			var last: Dictionary = e.follow.back()
 			p = last.p + last.l * (float(mini(rt - int(last.rx), 250)) / 1000.0)
 			q = last.q
-		n.global_transform = Transform3D(Basis(q).scaled(n.global_basis.get_scale()), p)
+			v = last.l if rt - int(last.rx) < 250 else Vector3.ZERO
+		# 0.2.2: bounded acceleration toward the interpolated pose (see FOLLOW_MAX_ACCEL)
+		var dt := 1.0 / float(maxi(1, Engine.physics_ticks_per_second))
+		if not e.follow_has or e.follow_out.distance_to(p) > FOLLOW_SNAP_M:
+			e.follow_has = true
+			e.follow_out = p
+			e.follow_v = v
+		else:
+			var dv := v + (p - e.follow_out) * FOLLOW_GAIN - e.follow_v
+			var lim := FOLLOW_MAX_ACCEL * dt
+			if dv.length() > lim:
+				dv = dv.normalized() * lim
+			e.follow_v += dv
+			e.follow_out += e.follow_v * dt
+		n.global_transform = Transform3D(Basis(q).scaled(n.global_basis.get_scale()), e.follow_out)
 
 
 func _sample_awake() -> void:

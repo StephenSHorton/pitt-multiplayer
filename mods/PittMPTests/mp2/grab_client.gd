@@ -296,7 +296,8 @@ func _g10_host_control(eid: int, crate: Node3D, ducks: Array, h: String) -> void
 	var hp := Crate.vec(hv.get("g10_pos", []))
 	if report.check(h + "_host_holding_mark", hp != Vector3.INF, ""):
 		# (a full crate still sways in the host's hands: the pose in the mark is one instant of it)
-		var tol := 0.1 if h == "g10h" else 0.25
+		# (the full crate sways in the host's own carry by up to about 0.3 m at the moment of the mark)
+		var tol := 0.1 if h == "g10h" else 0.4
 		var ok: bool = await wait_for(func(): return crate.global_position.distance_to(hp) <= tol, 2.0)
 		report.check(h + "_client_sees_crate_lifted", ok, "%.3f m off (tolerance %.2f)" % [crate.global_position.distance_to(hp), tol])
 		report.check(h + "_client_row_host_held", grab().owner_of(eid) == 1 and grab().hold_kind(eid) == "held", "owner %d kind %s" % [

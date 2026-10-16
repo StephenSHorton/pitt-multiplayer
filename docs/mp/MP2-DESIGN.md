@@ -332,7 +332,9 @@ puppets resting on the crate's floor, and a kinematic body never yields. Riders 
 newest epoch)`: a 150 ms blend to the host pose. Nothing is sent for riders.
 On the host the riders ride the kinematic follower (3.3 `host_follow`), which therefore has to move evenly:
 follower frames play at the sender's spacing (held frame `t_ms`, at most 100 ms past their arrival) on a
-clock that advances exactly one physics tick per step. With arrival times and the wall clock, frames that
+clock that advances exactly one physics tick per step. It steers toward the interpolated pose with bounded acceleration
+(40 m/s^2, gain 12/s, snap beyond 1 m), so frames that arrive late in a burst bend its path instead of
+jerking it. With arrival times and the wall clock, frames that
 came in bursts moved the follower in uneven steps and a full crate shook its ducks out (a Jolt check: a
 kinematic box lifting 24 ducks 1 m in 0.5 s keeps 24 when it moves every tick, 17 when it moves every other
 tick).

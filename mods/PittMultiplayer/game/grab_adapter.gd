@@ -117,9 +117,12 @@ static func throw_meta(node: Node) -> Dictionary:
 	var t := float(node.get_meta("player_throw_time", 0.0))
 	if t <= 0.0:
 		return {}
+	# a stamp from this same millisecond can read a hair in the future (ms * 0.001 vs
+	# ms / 1000.0 round differently): 50 ms of slack, then age 0
 	var age := now_s() - t
-	if age < 0.0 or age > 10.0:
+	if age < -0.05 or age > 10.0:
 		return {}
+	age = maxf(age, 0.0)
 	var pos = node.get_meta("player_throw_position", Vector3.ZERO)
 	return {"age_ms": int(age * 1000.0), "pos": pos if pos is Vector3 else Vector3.ZERO}
 

@@ -78,9 +78,32 @@ func _p2() -> void:
 	var to := broom.global_position + (p.global_position - broom.global_position).normalized() * 1.5 if p != null else broom.global_position
 	await cmd("player.teleport", {"position": [to.x, broom.global_position.y + 1.0, to.z]})
 	await sleep_ms(400)
+	# the game drops a carry when the player stands on a body the held one touches
+	# (main_camera._standing_on_held): never stand on the ducks lying around from B1/B2
+	for k in 4:
+		var rc = p.get("ground_raycast") if p != null else null
+		var gnd = rc.get_collider() if rc != null and rc.is_colliding() else null
+		if not (gnd is RigidBody3D):
+			break
+		var side := (broom.global_position - p.global_position).cross(Vector3.UP).normalized() * (0.8 * (k + 1)) * (1 if k % 2 == 0 else -1)
+		await cmd("player.teleport", {"position": [to.x + side.x, broom.global_position.y + 1.0, to.z + side.z]})
+		await sleep_ms(400)
 	face(broom.global_position)
 	await sleep_ms(200)
 	cam._begin_carry(broom)
+	# why a carry ends at once (diagnostics): what the player stands on, what the broom touches
+	var diag: Array = []
+	for i in 6:
+		await tree().physics_frame
+		var rc = p.get("ground_raycast") if p != null else null
+		var gnd = rc.get_collider() if rc != null and rc.is_colliding() else null
+		var touch: Array = []
+		for bdy in broom.get_colliding_bodies():
+			touch.append("%s(%d)" % [str(bdy.name), int(bodies().eid_of(bdy))])
+		diag.append({"picked": cam.picked_object == broom, "ground": "%s(%d)" % [str(gnd.name) if gnd != null else "none",
+			int(bodies().eid_of(gnd)) if gnd != null else 0], "touch": touch, "hands_d": snappedf(broom.global_position.distance_to(
+			cam.get("hands").global_position), 0.01) if cam.get("hands") != null else -1.0})
+	report.value("p2_carry_diag", diag)
 	var held: bool = await wait_for(func(): return grab.is_mine(eid), 3.0)
 	report.check("p2_broom_grabbed", held, "picked %s equipped %s dist %.2f m local_sim %s counters %s" % [
 		cam.picked_object == broom, cam.get("equipped_item") == broom, cam.global_position.distance_to(broom.global_position),

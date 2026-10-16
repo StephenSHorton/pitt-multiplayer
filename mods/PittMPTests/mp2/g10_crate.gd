@@ -71,14 +71,19 @@ static func grab_by_input(sc, crate: Node3D, tag: String) -> bool:
 		return false
 	var ray: RayCast3D = cam.get("interact_ray")
 	var side := 0.35 if (crate.global_transform.affine_inverse() * cam.global_position).x > 0.0 else -0.35
-	var aim: Vector3 = crate.global_transform * Vector3(side, 0.3, 0)
 	var seen: Array = []
-	var ok: bool = await sc.wait_for(func():
-		sc.face(aim - Vector3(0, 0.2, 0))
-		ray.force_raycast_update()
-		var c = ray.get_collider()
-		seen.append(str(c.name) if c != null else "none")
-		return c == crate, 2.0)
+	var ok := false
+	# a duck leaning over the rim can sit in front of one spot of the wall: try a few
+	for spot in [Vector3(side, 0.3, 0), Vector3(side, 0.15, -0.35), Vector3(side, 0.15, 0.35), Vector3(side, 0.1, 0)]:
+		var aim: Vector3 = crate.global_transform * spot
+		ok = await sc.wait_for(func():
+			sc.face(aim - Vector3(0, 0.2, 0))
+			ray.force_raycast_update()
+			var c = ray.get_collider()
+			seen.append(str(c.name) if c != null else "none")
+			return c == crate, 1.0)
+		if ok:
+			break
 	if not sc.report.check(tag + "_ray_on_crate", ok, str(seen.slice(maxi(0, seen.size() - 3)))):
 		return false
 	await press_lmb(sc)
