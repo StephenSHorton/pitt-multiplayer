@@ -64,6 +64,15 @@ NOTES
 Set-Content -LiteralPath (Join-Path $stage 'README.txt') -Value $readme -Encoding UTF8
 
 if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
-Compress-Archive -Path $stage -DestinationPath $zip
+# Compress-Archive on Windows PowerShell 5.1 writes backslash entry names; write '/' (zip spec).
+Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
+$root = Split-Path -Parent $stage
+$archive = [System.IO.Compression.ZipFile]::Open($zip, 'Create')
+try {
+  foreach ($f in Get-ChildItem -LiteralPath $stage -Recurse -File) {
+    $entry = $f.FullName.Substring($root.Length + 1).Replace('\', '/')
+    [void][System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($archive, $f.FullName, $entry)
+  }
+} finally { $archive.Dispose() }
 $count = (Get-ChildItem -LiteralPath $stage -Recurse -File).Count
 Write-Host ("Built {0} ({1} files, {2:N0} KB)" -f $zip, $count, ((Get-Item -LiteralPath $zip).Length / 1KB))
