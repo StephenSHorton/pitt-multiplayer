@@ -1243,6 +1243,7 @@ transport conditioner. Screenshots go to `dist/screens/mp2-*.png`.
 | G8 | G1 under 100 ms ± 30 ms, 5 % loss | landing within 1 m; no stuck ownership |
 | G9 | Place a sticky panel | host panel placed STATIC, pose ±1 cm |
 | W1 | Manual duck workbench: the HUD progress bar is the operator's (0.2.2) | the client crafts: its bar shows, the host's stays hidden; the host crafts: its bar shows, the client's stays hidden |
+| W2 | Client holds craft at a manual bench (0.2.2) | the hold spans items: a 12 s hold yields the host's count within 1 |
 | M1 | Open upgrade menu follows another player's purchase (0.2.2) | the client's open menu shows the host's purchase (row level / price) and a money-only change (credits) without reopening; the host's open menu shows a client's purchase |
 | T1 | Client's equipped broom sweeps along its facing (0.2.2) | at 4 yaws: the rig copy pushes along the rig's view (dot > 0.9) and a duck 2.6 m in front moves >= 0.2 m within 35 degrees of the facing |
 | G10 | **Client lifts the CRATE tool with ducks inside** (0.2.2, real input path: interact ray + LMB) | empty, with 3 ducks and full (24 dropped in 3 layers, >= 18 inside; lifting it may drop <= 4 of the top layer, on both peers alike): granted, no deny, the crate rises ≥ 0.3 m on both peers, the host copy within 15 cm of the client pose, the ducks stay inside it on both while lifted and swung; after the drop the client converges within 5 cm; control: the host lifts it, the client sees it raised with the ducks inside |

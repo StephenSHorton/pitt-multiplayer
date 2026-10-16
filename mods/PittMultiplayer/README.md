@@ -85,7 +85,8 @@ it on the client's screen, while the host's copies ride the host's crate; when i
 down they settle back onto the host's poses. Also in 0.2.2: a client's broom sweeps where
 the client looks (it swept to the left); the workbench progress bar, the trading
 terminal's result popup and bench camera shakes are only the operating player's; an open
-upgrade menu shows other players' purchases and money changes at once. Host and clients
+upgrade menu shows other players' purchases and money changes at once; holding left click
+at a manual bench keeps crafting for a client as for the host. Host and clients
 must all run 0.2.2.
 
 ## Known MP2 limitations

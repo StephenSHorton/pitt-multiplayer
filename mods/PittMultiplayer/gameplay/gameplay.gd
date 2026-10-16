@@ -331,10 +331,19 @@ func bench_hold(node: Object, peer: int) -> void:
 
 
 ## false = keep crafting (another holder remains).
+## peer 0 is the bench itself (a craft finished, workbench._process): it stops as in
+## single player, and remote players still holding craft start the next item at once,
+## as the host player's own interact_ray does every frame while LMB is held (0.2.2: a
+## client got one item per press). The host player's hold is re-armed by its ray.
 func bench_release(node: Object, peer: int) -> bool:
 	var key := _bench_key(node)
 	if peer <= 0:
-		_holders.erase(key)
+		var held: Dictionary = _holders.get(key, {})
+		held.erase(1)
+		if held.is_empty():
+			_holders.erase(key)
+		else:
+			Callable(self, "_rearm_bench").call_deferred(key)
 		return true
 	var hs: Dictionary = _holders.get(key, {})
 	hs.erase(peer)
@@ -342,6 +351,19 @@ func bench_release(node: Object, peer: int) -> bool:
 		_holders.erase(key)
 		return true
 	return false
+
+
+## Deferred after a finished craft: the next item for the first remote holder.
+func _rearm_bench(key: int) -> void:
+	if not live or role != "host":
+		return
+	var held: Dictionary = _holders.get(key, {})
+	var bench = _bench_of(key)
+	if held.is_empty() or bench == null or not is_instance_valid(bench) or bool(bench.get("is_crafting")) 			or not bench.has_method("start_crafting"):
+		return
+	var peers: Array = held.keys()
+	peers.sort()
+	host_exec(int(peers[0]), func(): bench.start_crafting())
 
 
 func bench_held_by(node: Object, peer: int) -> bool:

@@ -4,6 +4,8 @@ extends "dispenser.gd"
 ##   W1  the manual duck workbench's HUD progress bar is the operator's only: the
 ##       client crafts (its bar shows, the host's stays hidden), then the host
 ##       crafts (its bar shows, the client's stays hidden)
+##   W2  holding LMB at the manual duck bench keeps crafting across items: the client's
+##       hold of W2_HOLD_S yields as many ducks as the host's own hold (within 1)
 ##   M1  an open upgrade menu follows another player's purchase live: the client has
 ##       it open while the host buys through its own row, then the reverse; the
 ##       viewer's row text (level, price) changes without reopening the menu
@@ -13,6 +15,7 @@ extends "dispenser.gd"
 ## Marks: w1_*, m1_*, t1_*.
 
 const BAR_GROUP := "WorkbenchProgress"
+const W2_HOLD_S := 12.0
 const T1_YAWS := [0.0, 1.3, 2.6, 4.2]
 const T1_PITCH := -0.4
 const T1_MAX_ANGLE_DEG := 35.0
@@ -126,6 +129,81 @@ func w1_client() -> void:
 	await shot("mp2-w1-client-while-host-crafts")
 	report.mark("w1_client_checked_b")
 	await wait_peer_mark("w1_done", 30.0)
+
+
+# ---------------------------------------------------------------- W2
+
+## Host: ducks the bench spawns while `run` runs.
+func _w2_count(bench: Node3D, run: Callable) -> int:
+	var made: Array = []
+	var sub = api.events.on("entity.spawned", func(ev):
+		var pid := String(ev.payload.get("pool_id", ""))
+		var n = api.entities.get_node(int(ev.payload.get("entity_id", 0)))
+		if pid.begins_with("duck") and n != null and (n as Node3D).global_position.distance_to(bench.global_position) < 4.0:
+			made.append(int(ev.payload.entity_id)))
+	await run.call()
+	await sleep_ms(500)
+	api.events.off(sub)
+	return made.size()
+
+
+func _w2_clear(bench: Node3D) -> void:
+	for n in tree().get_nodes_in_group("product"):
+		if n is RigidBody3D and n.visible and (n as Node3D).global_position.distance_to(bench.global_position) < 5.0:
+			g("ObjectPoolManager").recycle(n)
+
+
+func w2_host() -> void:
+	report.begin("W2_bench_hold_keeps_crafting")
+	var bench := _bench()
+	var start := player().global_position if player() != null else Vector3.INF
+	if not report.check("w2_bench", bench != null, ""):
+		report.mark("w2_ready", {"w2_ok": false})
+		return
+	_w2_clear(bench)
+	report.mark("w2_ready", {"w2_ok": true})
+	# the client holds
+	var client_n: int = await _w2_count(bench, func():
+		await wait_peer_mark("w2_client_holding", 60.0)
+		await wait_peer_mark("w2_client_released", W2_HOLD_S + 30.0))
+	await sleep_ms(1000)
+	_w2_clear(bench)
+	# the host holds the same time
+	var host_n: int = await _w2_count(bench, func():
+		await _at_bench(bench)
+		_hold_lmb(true)
+		await sleep_ms(int(W2_HOLD_S * 1000.0))
+		_hold_lmb(false))
+	report.value("w2_counts", {"client": client_n, "host": host_n, "hold_s": W2_HOLD_S})
+	report.check("w2_host_hold_crafts_several", host_n >= 2, "%d ducks in %.0f s" % [host_n, W2_HOLD_S])
+	report.check("w2_client_hold_matches_host", client_n >= host_n - 1 and client_n >= 2,
+		"client %d vs host %d ducks in %.0f s" % [client_n, host_n, W2_HOLD_S])
+	await sleep_ms(1000)
+	_w2_clear(bench)
+	if start != Vector3.INF:
+		await cmd("player.teleport", {"position": [start.x, start.y, start.z]})
+	await sleep_ms(400)
+	report.mark("w2_done")
+
+
+func w2_client() -> void:
+	report.begin("W2_bench_hold_keeps_crafting")
+	var rv: Dictionary = await wait_peer_mark("w2_ready", 90.0)
+	var bench := _bench()
+	if not bool(rv.get("w2_ok", false)) or bench == null:
+		report.mark("w2_client_holding")
+		report.mark("w2_client_released")
+		return
+	var on: bool = await _at_bench(bench)
+	report.check("w2_client_ray_on_bench", on, "")
+	_hold_lmb(true)
+	report.mark("w2_client_holding")
+	await sleep_ms(int(W2_HOLD_S * 1000.0))
+	_hold_lmb(false)
+	await sleep_ms(300)
+	await _step_back(bench.global_position, 2.5)
+	report.mark("w2_client_released")
+	await wait_peer_mark("w2_done", W2_HOLD_S + 60.0)
 
 
 # ---------------------------------------------------------------- M1

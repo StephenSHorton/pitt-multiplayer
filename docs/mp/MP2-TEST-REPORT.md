@@ -129,9 +129,14 @@ cauldron (whose ritual bar now shows for the operating client too).
 | Pickaxe upgraded / UV dispensed / crate n/10 / keycard notifications | `pickaxe.gd:206`, `ore_processor.gd:191`, `wodd_crate.gd:240`, `anomaly_workbench.gd:1613` | shared | no (host only) |
 | Crate break shake, bonus texts, maw death screen | `wodd_crate.gd:538`, `hud.gd`, `bottom_maw.gd:312` | shared / shared / operator | n/a (correct) |
 
-Found during the audit, not fixed in 0.2.2: a client holding LMB at a manual bench gets one item per
-press (the host clears the holder set when a craft completes; the client keeps its `_holding` key and
-never sends a new start), while the host player keeps crafting as in single player.
+**Hold-to-craft (found during the audit, fixed in 0.2.2).** A client holding LMB at a manual bench got
+one item per press, while the host player keeps crafting as in single player (its `interact_ray` calls
+`start_crafting` every frame while LMB is held). When a craft finished, the bench's own `stop_crafting`
+(peer 0) cleared the whole holder set, and the client, still holding, never sends a second start (one
+start per hold). **Fix:** `gameplay.bench_release` for peer 0 keeps the remote holders and starts the
+next item for them at once (deferred, `_rearm_bench`); the hold ends on release, on looking away (the
+client's ray stops the bench) or on disconnect. W2 (hold 12 s): before, client 1 duck vs host 3; after,
+client 3 vs host 3.
 
 ### 0.2.2: an open upgrade menu did not follow other players' purchases
 
@@ -153,13 +158,11 @@ terminal's world-screen mirror stays a snapshot, as in the game.
 | client's open menu, host money +12 345 | credits `$4,999,990` unchanged | `$5,012,335` |
 | host's open menu, client buys SPRINT | row `LVL 1/3 \| $1000` unchanged | `LVL 2/3` |
 
-**Final runs (0.2.2):** headless 427 passed / 0 failed; `-Suite all` decomp: MP1 host 38/38,
-client 34/34, MP2 host 173/173, client 173/174; `-Suite all -SteamLanes 4`: MP1 38/38, 34/34, MP2
-173/173, 174/174. Real save folder unchanged (the first runs, while the real game was being played on
-this PC, flagged its own autosaves; the decomp instances always passed the T0 gate). Not run:
-`-HostLive` / `-ClientLive`.
+**Final runs (0.2.2, with W2):** headless 427 passed / 0 failed; `-Suite all` decomp: MP1 host 38/38,
+client 34/34, MP2 host 175/175, client 174/174 (B6 p95 0.11 m); `-Suite all -SteamLanes 4`: the same
+counts (B6 p95 0.17 m). Real save folder unchanged. Not run: `-HostLive` / `-ClientLive`.
 
-**Flaky, not caused by these fixes as far as the runs show.** B6 (100 ms +- 30, 5 % loss) fails now and
+**Flaky in earlier runs of the same code, not caused by these fixes as far as the runs show.** B6 (100 ms +- 30, 5 % loss) fails now and
 then in full runs: moving p95 0.25 to 0.28 m against the 0.25 m limit in 4 of 7 full plain runs (0.07 to
 0.20 m in the others, 0.15 to 0.19 m when run alone or after W1/M1/G10), once the budget did not recover
 in 15 s, and with the 0.2.2 mod but the 0.2.1-era test files `b6_came_to_rest_70pct` failed (34 of 50

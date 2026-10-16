@@ -43,6 +43,8 @@ func run() -> void:
 			await _sub(Dispenser).run_host()
 		if wants("W1"):
 			await _sub(Coop).w1_host()
+		if wants("W2"):
+			await _sub(Coop).w2_host()
 		if wants("M1"):
 			await _sub(Coop).m1_host()
 		# the host spawns the test bodies at the client's avatar: wait until it stands still
@@ -89,6 +91,8 @@ func run() -> void:
 			await _sub(Dispenser).run_client()
 		if wants("W1"):
 			await _sub(Coop).w1_client()
+		if wants("W2"):
+			await _sub(Coop).w2_client()
 		if wants("M1"):
 			await _sub(Coop).m1_client()
 		# P10 and P1 each end a combo: the mirrored combo_ended reaches hud.show_result, which
