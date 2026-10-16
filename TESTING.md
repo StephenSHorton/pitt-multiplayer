@@ -117,6 +117,8 @@ the game's `restartAppIfNecessary` does not go through Steam's launch-option dia
 >= `max_channels - 1` is sent on lane 0), the bug of the first two-PC Steam test (0.2.0: channel 3 was
 dropped, so clients saw no new spawns and none of their interactions reached the host). `-Suite mp1` (default) runs this MP1 scenario, `-Suite mp2` the MP2 harness below,
 `-Suite all` both (two runs; the MP1 report is kept as `dist\mp-loopback-report.mp1.json`).
+A `Parse Error` / `Compile Error` in an instance log of the run fails it (a scenario file that does not
+compile is otherwise skipped silently by its caller).
 
 ### MP2 shared world: headless BODIES suites (`test_mp2_bodies_*`)
 
@@ -158,6 +160,8 @@ files run in order. BODIES (`mp2/bodies_host.gd`, `mp2/bodies_client.gd`):
 | D1 | the host holds LMB at the manual duck workbench (the game's own `interact_ray` -> `workbench.craft_item` spawn): the client sees the duck with the host eid within 1.5 s |
 | H1 | client, right after the join and again at the end: the game's HUD money label (`hud.gd` `$Money`) is drawn on screen (visible, opaque, inside the viewport, its CanvasLayer shown), shows the host's money formatted as the game does, and `GameState.is_game_started` is true |
 | D2 | the client holds LMB at its copy of the bench: the forwarded craft makes a duck on the host, the client sees it, no local craft; releasing stops the host's bench |
+| G1-G6 | GRAB (`mp2/grab_host.gd`, `mp2/grab_client.gd`; MP2-DESIGN 11.2): grab + throw, deny, race, owner silence, pause release; G5 (disconnect) after the end checks |
+| G10 | the client lifts the game's CRATE (pool `tool_box`) through the interact ray + an LMB click, empty and then with 3 ducks inside (`mp2/g10_crate.gd`): it rises >= 0.3 m on both peers, the ducks stay inside it on both while lifted and swung, everything converges within 5 cm after the drop; then the host lifts it as a control (0.2.2, the second two-PC Steam test) |
 | end | client: no unexpected strays, orphan frames <= 1 %, local money writes only where expected, 60 Hz |
 
 ## Live (`tools/test-live.ps1`)

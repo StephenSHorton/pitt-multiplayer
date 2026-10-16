@@ -321,6 +321,16 @@ code moves the body) and removes the D22 exception. `set_local_sim(eid, false, m
 local until a host record with `epoch ≥ min_epoch` arrives, then re-puppetizes and blends from the local
 pose over 150 ms; with no such record within 1 s it snaps to the latest host state.
 
+**Riders (0.2.2).** A body GRAB carries (local_sim, not equipped) takes the puppets in or on it along: every
+pooled puppet it touches (`get_colliding_bodies`; the game's carry turns `contact_monitor` on) or whose
+position lies inside the box of its collision shapes (grown 5 cm, plus 0.6 m above; scanned every 4th frame)
+becomes local_sim too and simulates with it, while the host's copies ride the host's kinematic follower.
+Without this a crate with ducks inside could not be lifted on a client: the ducks were frozen KINEMATIC
+puppets resting on the crate's floor, and a kinematic body never yields. Riders are host-owned (`own` kind
+`""`, no HELD flag, not hidden); one that the host reports held or hidden leaves at once. When the carry ends
+(the carried body is a puppet again) every rider returns to puppet mode like `set_local_sim(eid, false,
+newest epoch)`: a 150 ms blend to the host pose. Nothing is sent for riders.
+
 **Stray guard (`world/bodies/stray_guard.gd`).** Every physics frame (priority 101) and every process frame,
 the client compares `Σ pool.active.size()` with its puppet + local_sim count and, on a mismatch, diffs the
 active sets. Any active pooled node without `pitt_mp_puppet` that is not `local_sim` is recycled at once
@@ -1222,6 +1232,7 @@ transport conditioner. Screenshots go to `dist/screens/mp2-*.png`.
 | G7 | **Throw ducks into the maw** (with P1) | money, stats and nutrition counted once each |
 | G8 | G1 under 100 ms ± 30 ms, 5 % loss | landing within 1 m; no stuck ownership |
 | G9 | Place a sticky panel | host panel placed STATIC, pose ±1 cm |
+| G10 | **Client lifts the CRATE tool with ducks inside** (0.2.2, real input path: interact ray + LMB) | empty and with 3 ducks: granted, no deny, the crate rises ≥ 0.3 m on both peers, the host copy within 15 cm of the client pose, the ducks stay inside it on both while lifted and swung; after the drop the client converges within 5 cm; control: the host lifts it, the client sees it raised with the ducks inside |
 
 **Integration (all streams):** I1 = P1 + G7 + B4 in one session with a late joiner during the feeding; I2 =
 I1 with `-HostLive` (real game host, launch stage only).

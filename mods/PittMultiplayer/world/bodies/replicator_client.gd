@@ -16,6 +16,8 @@ extends RefCounted
 ## others and detects a puppet whose node client game code recycled (or the
 ## pool handed to another eid): the puppet is dropped and respawned from its
 ## newest host state, so two eids never drive one node.
+## Riders (0.2.2): puppets in or on a body the local player carries (ducks in a
+## crate) simulate locally with it until the carry ends (_carry_riders).
 
 const Codec = preload("../../net/codec.gd")
 const Interp = preload("interp.gd")
@@ -34,6 +36,9 @@ const RELEASE_WAIT_MS := 1000
 const D22_MASS := 2.0
 const NETQ_MS := 1000
 const VERIFY_PER_FRAME := 64
+const RIDER_SCAN_FRAMES := 4      # the in/on scan of a carried body runs every 4th frame
+const RIDER_MARGIN_M := 0.05      # around the carried body's shapes
+const RIDER_HEAD_M := 0.6         # room above them (a pile in a crate, ducks on a panel)
 
 var bodies = null
 var puppets: Dictionary = {}      # eid -> PuppetBody
@@ -41,6 +46,8 @@ var tombs: Dictionary = {}        # eid -> until ms
 var orphans: Dictionary = {}      # eid -> [{rx, state}]
 var pending: Dictionary = {}      # eid -> {d, fb, next, t}
 var active: Dictionary = {}       # eid -> true: driven this frame (see header)
+var carriers: Dictionary = {}     # eid -> true: local_sim bodies GRAB carries (_carry_riders)
+var _rider_k := 0
 var _by_node: Dictionary = {}     # node instance id -> eid (pooled puppets)
 var _pooled_n := 0
 var _rr_keys: Array = []
@@ -64,7 +71,7 @@ var q_late := 0
 var counters := {"puppets_spawned": 0, "puppets_despawned": 0, "frames_rx": 0, "records_rx": 0,
 	"orphan_frames": 0, "orphans_adopted": 0, "late_frames": 0, "client_pool_full": 0, "puppet_unfreeze": 0,
 	"fixture_mismatch": 0, "snaps": 0, "blends": 0, "decode_errors": 0, "wsnap_rows": 0, "wsnap_rejected": 0,
-	"frames_gaps": 0, "puppet_lost": 0}
+	"frames_gaps": 0, "puppet_lost": 0, "riders_on": 0, "riders_off": 0}
 
 
 func _init(p_bodies = null, p_pool_ids: Array = []) -> void:
@@ -294,6 +301,12 @@ func despawn(eid: int) -> void:
 
 
 func _forget_puppet(pb: PuppetBody) -> void:
+	_end_carry(pb.eid)
+	if pb.rider_of != 0:
+		var cb: PuppetBody = puppets.get(pb.rider_of, null)
+		if cb != null:
+			cb.riders.erase(pb.eid)
+		pb.rider_of = 0
 	puppets.erase(pb.eid)
 	active.erase(pb.eid)
 	if pb.kind == "pooled":
@@ -349,6 +362,7 @@ func clear() -> void:
 			n.remove_meta(PUPPET_META)
 	puppets.clear()
 	active.clear()
+	carriers.clear()
 	_by_node.clear()
 	_pooled_n = 0
 	_rr_keys.clear()
@@ -472,6 +486,8 @@ func physics_step() -> void:
 		_apply_batch()
 	if frozen:
 		return
+	if not carriers.is_empty():
+		_carry_riders()
 	var rt := _host_now() - interp_delay
 	var done: Array = []
 	for eid in active:
@@ -600,11 +616,20 @@ func set_local_sim(eid: int, on: bool, min_epoch: int) -> void:
 	var node := pb.node()
 	active[eid] = true
 	if on:
+		if pb.rider_of != 0:
+			# GRAB takes a rider: it is carried itself now
+			var cb: PuppetBody = puppets.get(pb.rider_of, null)
+			if cb != null:
+				cb.riders.erase(eid)
+			pb.rider_of = 0
 		pb.local_sim = true
 		pb.release_wait = false
 		_remove_exception(pb)
 		if node is RigidBody3D:
 			node.freeze = false
+		if not frozen:
+			carriers[eid] = true
+			pb.has_box = false
 		return
 	if not pb.local_sim:
 		return
@@ -643,6 +668,128 @@ func _check_release(pb: PuppetBody, now: int) -> void:
 		pb.force_snap = true     # no record of the new epoch in time: the host state wins
 
 
+# ================================================================== riders (0.2.2)
+
+## The local player carries a body (GRAB local_sim) with puppets in or on it: a
+## crate with ducks inside. A frozen KINEMATIC puppet never yields, so the
+## carried body could not rise through the ducks resting in it (the second
+## two-PC Steam test: the client could not pick up a crate with ducks in it).
+## Every puppet the carried body touches, or that lies inside its shapes' box
+## (plus room above), rides: it simulates locally like the carried body and
+## moves with it, while the host's copies ride the host's follower. When the
+## carry ends (the carried body is a puppet again), or the host reports a
+## rider held or hidden, the rider becomes a puppet again and blends to the
+## host pose.
+func _carry_riders() -> void:
+	_rider_k += 1
+	var scan := _rider_k % RIDER_SCAN_FRAMES == 0
+	for ceid in carriers.keys():
+		var cb: PuppetBody = puppets.get(ceid, null)
+		var cn: Node3D = cb.node() if cb != null else null
+		if cb == null or cn == null or not cb.local_sim:
+			_end_carry(ceid)
+			continue
+		for e in cb.riders.keys():
+			var rb: PuppetBody = puppets.get(e, null)
+			if rb == null or rb.node() == null:
+				cb.riders.erase(e)
+			elif not _can_ride(rb):
+				_unride(rb, cb)
+		if cb.owner_kind == "equipped" or cb.hidden or cb.nocollide:
+			continue
+		if cn is RigidBody3D and (cn as RigidBody3D).contact_monitor:
+			for b in (cn as RigidBody3D).get_colliding_bodies():
+				var e := int(_by_node.get(b.get_instance_id(), 0))
+				if e > 0 and e != ceid:
+					_ride(puppets.get(e, null), cb)
+		if not scan:
+			continue
+		var box := _carry_box(cb, cn)
+		var inv := cn.global_transform.affine_inverse()
+		var at := cn.global_position
+		var reach := box.get_longest_axis_size() + box.position.length() + 0.5
+		for e in puppets:
+			var pb: PuppetBody = puppets[e]
+			if pb.local_sim or pb.kind != "pooled":
+				continue
+			var n := pb.node()
+			if n != null and n.global_position.distance_squared_to(at) <= reach * reach \
+					and box.has_point(inv * n.global_position):
+				_ride(pb, cb)
+
+
+func _can_ride(pb: PuppetBody) -> bool:
+	return pb.kind == "pooled" and not pb.hidden and not pb.nocollide and pb.owner_kind == "" \
+		and (pb.last_flags & Codec.RF_HELD) == 0 and pb.node() is RigidBody3D
+
+
+func _ride(pb: PuppetBody, cb: PuppetBody) -> void:
+	if pb == null or pb.local_sim or not _can_ride(pb):
+		return
+	var n := pb.node() as RigidBody3D
+	pb.rider_of = cb.eid
+	cb.riders[pb.eid] = true
+	pb.local_sim = true
+	pb.release_wait = false
+	active[pb.eid] = true
+	_remove_exception(pb)
+	n.freeze = false
+	var cn := cb.node() as RigidBody3D
+	n.linear_velocity = cn.linear_velocity if cn != null else Vector3.ZERO
+	n.angular_velocity = Vector3.ZERO
+	n.sleeping = false
+	counters.riders_on += 1
+
+
+## Back to puppet mode, blending from the local pose to the host's (set_local_sim off).
+func _unride(pb: PuppetBody, cb: PuppetBody) -> void:
+	if cb != null:
+		cb.riders.erase(pb.eid)
+	if pb.rider_of == 0:
+		return
+	pb.rider_of = 0
+	counters.riders_off += 1
+	set_local_sim(pb.eid, false, int(pb.newest().get("epoch", 0)))
+
+
+func _end_carry(ceid: int) -> void:
+	if not carriers.has(ceid):
+		return
+	carriers.erase(ceid)
+	var cb: PuppetBody = puppets.get(ceid, null)
+	if cb == null:
+		return
+	for e in cb.riders.keys():
+		var rb: PuppetBody = puppets.get(e, null)
+		if rb != null:
+			_unride(rb, cb)
+	cb.riders.clear()
+
+
+## The carried body's collision shapes as one box in its own frame, grown by
+## RIDER_MARGIN_M and by RIDER_HEAD_M upward (once per carry).
+func _carry_box(cb: PuppetBody, cn: Node3D) -> AABB:
+	if cb.has_box:
+		return cb.box
+	var inv := cn.global_transform.affine_inverse()
+	var box := AABB()
+	var first := true
+	for c in cn.find_children("*", "CollisionShape3D", true, false):
+		var cs := c as CollisionShape3D
+		if cs.shape == null or cs.disabled:
+			continue
+		var a: AABB = (inv * cs.global_transform) * cs.shape.get_debug_mesh().get_aabb()
+		box = a if first else box.merge(a)
+		first = false
+	if first:
+		box = AABB(Vector3(-0.3, -0.3, -0.3), Vector3(0.6, 0.6, 0.6))
+	box = box.grow(RIDER_MARGIN_M)
+	box.size.y += RIDER_HEAD_M
+	cb.box = box
+	cb.has_box = true
+	return box
+
+
 func is_local_sim(eid: int) -> bool:
 	var pb: PuppetBody = puppets.get(eid, null)
 	return pb != null and pb.local_sim
@@ -661,12 +808,15 @@ func freeze_world() -> void:
 	if frozen:
 		return
 	frozen = true
+	carriers.clear()
 	for eid in puppets:
 		var pb: PuppetBody = puppets[eid]
 		pb.local_sim = true
 		pb.release_wait = false
 		_remove_exception(pb)
 		_restore_layers(pb)
+		pb.rider_of = 0
+		pb.riders.clear()
 		var n := pb.node()
 		if n is RigidBody3D:
 			n.freeze = false

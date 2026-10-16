@@ -239,6 +239,46 @@ func test_owner_never_receives_its_body() -> void:
 	assert_true(before >= 1, "had records before")
 
 
+## 0.2.2: a carried body with puppets resting on / in it (the crate with ducks):
+## frozen KINEMATIC puppets would hold it down, so they ride (local sim) until
+## the carry ends; a puppet away from it is left alone.
+func test_carried_body_takes_its_riders_along() -> void:
+	var pc = await rig.pair()
+	var h = pc[0]
+	var c = pc[1]
+	var crate: RigidBody3D = rig.spawn(h, "toy_gambling_wodden_crate", Vector3(0, 0.15, 3))
+	var on_top: RigidBody3D = rig.spawn(h, "duck", Vector3(0, 0.45, 3))
+	var away: RigidBody3D = rig.spawn(h, "duck", Vector3(2, 0.15, 3))
+	await rig.until(func(): return c.bodies.client.puppets.size() >= 3, 3.0)
+	await rig.ms(1200)       # settle on the host; the client draws the rest poses
+	var ce := _host_id(h, crate)
+	var de := _host_id(h, on_top)
+	var ae := _host_id(h, away)
+	var nc := _client_node(c, ce) as RigidBody3D
+	var nd := _client_node(c, de) as RigidBody3D
+	var na := _client_node(c, ae) as RigidBody3D
+	assert_true(nd.freeze and na.freeze, "puppets before the carry")
+	c.bodies.set_local_sim(ce, true)
+	var ok: bool = await rig.until(func(): return c.bodies.is_local_sim(de), 1.0)
+	assert_true(ok, "the duck on the carried body rides")
+	assert_false(nd.freeze, "and simulates locally")
+	assert_false(c.bodies.is_local_sim(ae), "the duck beside it stays a puppet")
+	assert_true(na.freeze, "frozen")
+	var y0 := nc.global_position.y
+	var dy0 := nd.global_position.y
+	for i in 30:
+		nc.linear_velocity = Vector3(0, 2.0, 0)     # the game's carry sets the velocity every frame
+		await tree.physics_frame
+	assert_true(nc.global_position.y - y0 > 0.5, "the carried body rises (%.3f m)" % (nc.global_position.y - y0))
+	assert_true(nd.global_position.y - dy0 > 0.5, "with its rider (%.3f m)" % (nd.global_position.y - dy0))
+	c.bodies.set_local_sim(ce, false, 0)
+	ok = await rig.until(func(): return not c.bodies.is_local_sim(ce) and not c.bodies.is_local_sim(de), 1.5)
+	assert_true(ok, "the carry ended: both are puppets again")
+	assert_true(nd.freeze and nd.freeze_mode == RigidBody3D.FREEZE_MODE_KINEMATIC, "the rider is frozen again")
+	assert_eq(int(c.bodies.client.counters.riders_on), int(c.bodies.client.counters.riders_off), "every rider handed back")
+	assert_true(c.bodies.client.carriers.is_empty(), "no carrier left")
+
+
 func test_d22_small_products_pass_through_the_player() -> void:
 	var pc = await rig.pair()
 	var h = pc[0]

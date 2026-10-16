@@ -76,7 +76,13 @@ both files to a bug report.
 0.2.1 fixes the first two-PC Steam test: the bundled GodotSteam (4.19.1) only uses Steam
 lanes 0-2 and sent the shared world's channel 3 on lane 0, where it was dropped, so a
 client saw no newly spawned objects and none of its interactions (grabs, machines,
-crafting) reached the host. Host and clients must all run 0.2.1.
+crafting) reached the host.
+
+0.2.2 fixes the second two-PC Steam test: a client could not lift a crate (or any box tool)
+with ducks in it. On a client every object is a frozen copy driven by the host, and the
+frozen ducks held the crate down. Now everything in or on what a client carries moves with
+it on the client's screen, while the host's copies ride the host's crate; when it is put
+down they settle back onto the host's poses. Host and clients must all run 0.2.2.
 
 ## Known MP2 limitations
 

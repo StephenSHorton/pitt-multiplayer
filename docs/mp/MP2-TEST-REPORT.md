@@ -1,5 +1,58 @@
 # MP2 test report (2026-10-15)
 
+## 0.2.2: the second two-PC Steam test (client could not pick up a crate with ducks in it)
+
+**Report.** 0.2.1 over real Steam, world traffic healthy (host log: ch3 both ways, `drops {}`):
+"he [the client] can't pick up the crate tool when there's ducks in it".
+
+**Object.** The box tool line (`upgradeUI.tool_scene_paths["box"]`): `scenes/crate.tscn`
+(`crate.gd`, key `OBJ_CRATE` = "CRATE", pool `tool_box`), then `box_carry_2.tscn` ("BIG BOX",
+`tool_box_2`), `box_cushion_3.tscn` ("BIG CUSHION BOX", `tool_box_3`) and `box_carry_4.tscn`
+("WHEELED CART", `tool_box_4`). All four are plain RigidBody3D boxes in group `draggable`
+(1 kg); the game carries contents only physically (the carry sets the box's velocity toward
+the hands every physics frame, `main_camera._physics_process`); nothing parents, joints or
+counts what is inside. The loopback check uses the CRATE; the fix is not specific to it.
+
+**Root cause.** On a client every replicated object is a puppet: frozen, FREEZE_MODE_KINEMATIC,
+driven from host frames. A client grab makes only the carried body dynamic (`set_local_sim`).
+The ducks in the crate stayed kinematic puppets resting on its floor, and a kinematic body
+never yields, so the velocity-driven crate could not rise through them. The host granted the
+grab (no deny: `grab_deny_reasons {}`, no revoke), its follower copy followed the client's
+held stream exactly, so it did not move either. Not the interact ray (it hit the crate), not
+`can_take`, not `_standing_on_held`. Evidence from the new G10 check before the fix: empty
+crate lifted 1.02 m; with 3 ducks `dy 0.000 m` on client and host, the client's held crate
+touching `{eid 1361, frozen: true, local_sim: false}` (a duck puppet) and the floor.
+
+**Fix.** `world/bodies/replicator_client.gd` riders (MP2-DESIGN 3.4): while the local player
+carries a body, every puppet it touches or that lies in / on it simulates locally with it;
+the host's copies ride its kinematic follower (Jolt moves bodies resting on a moving
+kinematic body). When the carry ends the riders blend back to the host poses. Client side
+only, no protocol change; 0.2.2 so all peers update together.
+
+**Before / after** (`-Suite mp2 -Scenario G10 -SteamLanes 4`, decomp x2):
+
+| Check | Before | After |
+|---|---|---|
+| empty crate, client lifts | dy 1.024 m, host copy follows (0.000 m) | same |
+| 3 ducks, client lifts | client dy 0.000 m, host dy 0.000 m: FAIL | client 0.962 m, host 0.962 m, follow 0.000 m |
+| ducks inside while lifted and swung | (not lifted) | inside on both peers |
+| after the drop | | client within 0.001 m of host, crate and ducks; ducks inside on both |
+| host lifts the same crate (control) | dy 0.92 m, client sees it, ducks inside | same |
+| run | host 39/40, client 56/57 | host 40/40, client 57/57 (riders_on 3, riders_off 3) |
+
+A headless check (`test_mp2_bodies_replication.test_carried_body_takes_its_riders_along`)
+covers the riders in the one-process rig. The loopback runner now fails a run whose instance
+log shows a GDScript parse / compile error (a scenario file that does not compile was
+skipped silently).
+
+**Final runs (0.2.2):** headless 427 passed / 0 failed; `-Suite all` decomp (MP1 host 38/38,
+client 34/34; MP2 host 126/126, client 138/138); `-Suite all -SteamLanes 4` the same counts.
+The real save folder check flagged `savegame.save`, `profile.cfg`, `pittapi.log` and
+`mp_session_last.json` in three of the four runs: the real game was being played (as a
+host) on this PC during the runs and saved / quit at 21:42; the decomp instances passed the
+T0 gate (user dir `PittMP-Dev`) every time. Not run: `-HostLive` / `-ClientLive` (the real
+game was in use).
+
 ## 0.2.1: the first two-PC Steam test (client could not interact, saw no new ducks)
 
 **Report.** v0.2.0 over real Steam: the client joined (handshake, save snapshot and world

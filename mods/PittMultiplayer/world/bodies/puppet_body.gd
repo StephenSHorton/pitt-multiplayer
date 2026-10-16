@@ -32,6 +32,11 @@ var local_sim := false
 var release_wait := false
 var min_epoch := 0
 var release_until_ms := 0
+# riders (a crate carried with ducks in it): see replicator_client._carry_riders
+var rider_of := 0               # eid of the carried body this one rides in / on
+var riders: Dictionary = {}     # carried body: eid -> true
+var box := AABB()               # carried body: its shapes (local frame) + room above
+var has_box := false
 # collision state
 var hidden := false
 var nocollide := false

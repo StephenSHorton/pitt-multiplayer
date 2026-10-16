@@ -4,7 +4,8 @@ extends "../scenario_base.gd"
 ## (scenario_mp2.gd, BODIES): `await run_grab(ids)` once in the shared world.
 ## Grabs go through the real main_camera._begin_carry (the GRAB extension).
 
-const ORDER := ["G1", "G3", "G2", "G4", "G6", "G5"]
+const ORDER := ["G1", "G3", "G2", "G4", "G6", "G10", "G5"]
+const Crate = preload("g10_crate.gd")
 
 
 func grab() -> Object:
@@ -190,3 +191,106 @@ func _g5() -> void:
 	report.mark("g5_leaving")
 	session.leave()
 	await wait_peer_mark("g5_end", 15.0)
+
+
+# ---------------------------------------------------------------- G10 a crate with ducks in it (0.2.2)
+
+func _g10_inside(tag: String, crate: Node3D, ducks: Array) -> bool:
+	var out := Crate.outside(crate, ducks)
+	return report.check(tag + "_client_ducks_inside", not ducks.is_empty() and out.is_empty(), "outside (crate frame) %s" % str(out))
+
+
+func _g10() -> void:
+	report.begin("G10_crate_with_ducks")
+	for phase in ["e", "d"]:
+		var tag: String = "g10" + phase
+		var m: Dictionary = await wait_peer_mark(tag + "_ready", 90.0)
+		var eid := int(m.get("g10_eid", 0))
+		if not report.check(tag + "_host_ready", eid > 0, ""):
+			return
+		var ok: bool = await wait_for(func(): return bodies().node_of(eid) != null, 3.0)
+		if not report.check(tag + "_crate_puppet_exists", ok, "eid %d" % eid):
+			return
+		var crate := bodies().node_of(eid) as RigidBody3D
+		var ducks: Array = []
+		for de in m.get("g10_ducks", []):
+			await wait_for(func(): return bodies().node_of(int(de)) != null, 3.0)
+			if bodies().node_of(int(de)) != null:
+				ducks.append(bodies().node_of(int(de)))
+		if phase == "d":
+			report.check("g10d_all_duck_puppets", ducks.size() == Crate.DUCK_OFFSETS.size(), "%d" % ducks.size())
+			_g10_inside("g10d_before", crate, ducks)
+		var y0 := crate.global_position.y
+		var c0: Dictionary = grab().counters()
+		var picked: bool = await Crate.grab_by_input(self, crate, tag)
+		report.check(tag + "_client_picked", picked and bodies().is_local_sim(eid), "picked %s local_sim %s" % [picked,
+			bodies().is_local_sim(eid)])
+		ok = await wait_for(func(): return grab().is_mine(eid), 2.0)
+		report.check(tag + "_granted", ok, "")
+		await Crate.lift(self)
+		await sleep_ms(1200)
+		var holding: bool = cam().picked_object == crate
+		var c1: Dictionary = grab().counters()
+		report.value(tag + "_grab_counters", {"denied": int(c1.get("grab_denied", 0)) - int(c0.get("grab_denied", 0)),
+			"revoked": int(c1.get("grab_revoked", 0)) - int(c0.get("grab_revoked", 0)), "dy": crate.global_position.y - y0})
+		report.check(tag + "_client_still_holding", holding, "")
+		report.check(tag + "_client_lifted", crate.global_position.y - y0 >= Crate.LIFT_M, "dy %.3f m" % (crate.global_position.y - y0))
+		if phase == "d":
+			_g10_inside(tag + "_held", crate, ducks)
+			await shot("mp2-g10-client-lifts-crate-with-ducks")
+		# what the held crate touches (the game turns contact_monitor on while carrying)
+		var contacts: Array = []
+		for b in crate.get_colliding_bodies():
+			contacts.append({"name": str(b.name), "eid": int(bodies().eid_of(b)), "frozen": b is RigidBody3D and b.freeze,
+				"local_sim": bodies().is_local_sim(int(bodies().eid_of(b)))})
+		report.value(tag + "_held_contacts", contacts)
+		report.mark(tag + "_holding", {"g10_pos": Crate.arr(crate.global_position)})
+		await wait_peer_mark(tag + "_follow_checked", 10.0)
+		await Crate.swing(self)
+		await sleep_ms(500)
+		report.check(tag + "_client_holding_after_swing", cam().picked_object == crate, "")
+		if phase == "d":
+			_g10_inside(tag + "_moved", crate, ducks)
+		report.mark(tag + "_moved")
+		await sleep_ms(600)
+		await Crate.swing(self, -1.0)
+		await Crate.lift(self, -1.0)
+		await sleep_ms(500)
+		var rel0 := _counter("grab_rel_tx")
+		if cam().picked_object == crate:
+			await Crate.press_lmb(self)
+		ok = await wait_for(func(): return _counter("grab_rel_tx") > rel0, 1.0)
+		report.check(tag + "_own_rel_sent", ok and cam().picked_object == null, "")
+		report.mark(tag + "_released")
+		var rv: Dictionary = await wait_peer_mark(tag + "_rest", 20.0)
+		var rest: Dictionary = rv.get("g10_rest", {})
+		var far := func() -> float:
+			var worst := crate.global_position.distance_to(Crate.vec(rest.get("crate", [])))
+			for d in ducks:
+				var hp := Crate.vec(rest.get(str(int(bodies().eid_of(d))), []))
+				worst = maxf(worst, (d as Node3D).global_position.distance_to(hp) if hp != Vector3.INF else 99.0)
+			return worst
+		ok = await wait_for(func(): return not rest.is_empty() and far.call() <= 0.05, 3.0)
+		report.check(tag + "_client_converged_5cm", ok, "worst %.3f m" % far.call())
+		report.check(tag + "_puppet_again", not bodies().is_local_sim(eid), "")
+		if phase == "d":
+			_g10_inside(tag + "_rest", crate, ducks)
+		report.mark(tag + "_checked")
+		if phase == "d":
+			await _g10_host_control(eid, crate, ducks)
+	await wait_peer_mark("g10_end", 30.0)
+
+
+## Control: the host grabs the crate; this client sees it rise with the ducks inside.
+func _g10_host_control(eid: int, crate: Node3D, ducks: Array) -> void:
+	var hv: Dictionary = await wait_peer_mark("g10h_holding", 40.0)
+	var hp := Crate.vec(hv.get("g10_pos", []))
+	if report.check("g10h_host_holding_mark", hp != Vector3.INF, ""):
+		var ok: bool = await wait_for(func(): return crate.global_position.distance_to(hp) <= 0.1, 2.0)
+		report.check("g10h_client_sees_crate_lifted", ok, "%.3f m off" % crate.global_position.distance_to(hp))
+		report.check("g10h_client_row_host_held", grab().owner_of(eid) == 1 and grab().hold_kind(eid) == "held", "owner %d kind %s" % [
+			grab().owner_of(eid), grab().hold_kind(eid)])
+		_g10_inside("g10h_held", crate, ducks)
+		await shot("mp2-g10-client-sees-host-carry-ducks")
+	report.mark("g10h_checked")
+	await wait_peer_mark("g10h_released", 20.0)

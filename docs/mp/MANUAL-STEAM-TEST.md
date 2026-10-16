@@ -187,6 +187,10 @@ this checks them over Steam between two real players.
     directions (`ch3 tx N/..B rx M/..B` with N, M > 0 on the host and the client) and
     `drops {}`; there is no `protocol drop kind_not_allowed:ents` (or `:interact`,
     `:own_req`) WARN.
+13. **The 0.2.1 bug (crate with ducks).** A buys a crate (box tool) and drops three or
+    four ducks into it. B picks the crate up and walks around with it: it lifts at once
+    and the ducks stay in it on both screens. B puts it down: on both screens the crate
+    and the ducks end up in the same place. Repeat with A carrying while B watches.
 
 ## Reporting
 

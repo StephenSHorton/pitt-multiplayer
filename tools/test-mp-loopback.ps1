@@ -84,6 +84,7 @@ $exe = if ($Headless -or -not (Test-Path -LiteralPath $windowGodot)) { $consoleG
 $devUser = Get-DevUserDir
 $realUser = Get-UserDir
 $runId = (Get-Date -Format 'yyyyMMdd-HHmmss')
+$runStart = Get-Date
 $failures = @()
 if ($HostLive -and $ClientLive) { Write-Bad '-HostLive and -ClientLive exclude each other'; exit 1 }
 if ($ClientLive -and $Clients -ne 1) { Write-Bad '-ClientLive runs one client'; exit 1 }
@@ -259,6 +260,13 @@ foreach ($pair in $pairs) {
         elseif ($s.info) { Write-Host ("    INFO {0} {1}.{2}: {3}" -f $name, $s.step, $s.name, $s.msg) }
     }
     Write-Ok ("{0}: {1} passed, {2} failed" -f $name, $r.summary.passed, $r.summary.failed)
+    # a scenario file that does not compile is skipped silently by its caller (0.2.2)
+    $ilog = Join-Path $devDist "$name.log"
+    if ((Test-Path -LiteralPath $ilog) -and (Get-Item -LiteralPath $ilog).LastWriteTime -ge $runStart) {
+        $bad = @(Select-String -LiteralPath $ilog -Pattern '(Parse|Compile) Error' | Select-Object -First 3)
+        foreach ($b in $bad) { Write-Bad "$name script error: $($b.Line.Trim())" }
+        if ($bad.Count -gt 0) { $failures += "$($name):script-compile" }
+    }
 }
 
 Write-Step 'Re-hashing the real save folder'
