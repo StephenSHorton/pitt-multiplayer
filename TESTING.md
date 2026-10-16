@@ -161,7 +161,10 @@ files run in order. BODIES (`mp2/bodies_host.gd`, `mp2/bodies_client.gd`):
 | H1 | client, right after the join and again at the end: the game's HUD money label (`hud.gd` `$Money`) is drawn on screen (visible, opaque, inside the viewport, its CanvasLayer shown), shows the host's money formatted as the game does, and `GameState.is_game_started` is true |
 | D2 | the client holds LMB at its copy of the bench: the forwarded craft makes a duck on the host, the client sees it, no local craft; releasing stops the host's bench |
 | G1-G6 | GRAB (`mp2/grab_host.gd`, `mp2/grab_client.gd`; MP2-DESIGN 11.2): grab + throw, deny, race, owner silence, pause release; G5 (disconnect) after the end checks |
-| G10 | the client lifts the game's CRATE (pool `tool_box`) through the interact ray + an LMB click, empty and then with 3 ducks inside (`mp2/g10_crate.gd`): it rises >= 0.3 m on both peers, the ducks stay inside it on both while lifted and swung, everything converges within 5 cm after the drop; then the host lifts it as a control (0.2.2, the second two-PC Steam test) |
+| W1 | manual duck workbench (`mp2/coop_checks.gd`): the client holds LMB at the bench, its HUD progress bar shows and the host's stays hidden; then the host crafts, its bar shows and the client's stays hidden (0.2.2) |
+| M1 | upgrade menu live refresh: the client has the menu open while the host buys through its own row (the client's row text changes without reopening) and while the host's money changes (credits follow); then the host has it open while the client buys (0.2.2) |
+| T1 | the client equips a broom (carry + the `equip` key) and sweeps (the `interact` key) at 4 yaws: on the host the broom on the client's rig pushes along the rig's view and a duck in front of the client moves along the client's facing (0.2.2) |
+| G10 | the client lifts the game's CRATE (pool `tool_box`) through the interact ray + an LMB click, empty, then with 3 ducks inside, then full (24 ducks in 3 layers) (`mp2/g10_crate.gd`): it rises >= 0.3 m on both peers, the ducks stay inside it on both while lifted and swung, everything converges within 5 cm after the drop; then the host lifts it as a control (0.2.2, the second two-PC Steam test) |
 | end | client: no unexpected strays, orphan frames <= 1 %, local money writes only where expected, 60 Hz |
 
 ## Live (`tools/test-live.ps1`)

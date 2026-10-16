@@ -38,6 +38,13 @@ func _force_clear_queue() -> void:
 	super()
 
 
+## Host: the trajectory of a cannon on a remote player's rig is that player's feedback.
+func _should_show_trajectory() -> bool:
+	if is_equipped and G.remote_owned(self):
+		return false
+	return super()
+
+
 func interact() -> void:
 	if G.input(self, "interact"):
 		return

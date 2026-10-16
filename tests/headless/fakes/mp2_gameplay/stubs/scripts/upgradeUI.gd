@@ -6,6 +6,7 @@ extends Control
 
 const COLOR_RED := Color("#ff0000")
 const COLOR_DIM := Color("#00cc00")
+const COLOR_GREEN := Color("#00ff00")
 
 @export var buy_sound: AudioStream
 @export var error_sound: AudioStream
@@ -137,3 +138,6 @@ func _recall_tool(tool_name: String) -> int:
 
 func _unit_owned_elsewhere(unit: Node) -> bool:
 	return bool(unit.get_meta("stub_owned_elsewhere", false))
+
+func _refresh_upgrade_row(_row: HBoxContainer):
+	calls.append("_refresh_upgrade_row")

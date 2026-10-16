@@ -388,8 +388,18 @@ func pool_full(pool_id: String) -> bool:
 
 
 func refresh_upgrade_ui() -> void:
+	request_upgrade_ui_refresh(true)
+
+
+## An open upgrade menu shows replicated changes live (upgrade_ui_ext, coalesced
+## per frame; 0.2.2). structural = levels / prices / unlocks; false = money only.
+func request_upgrade_ui_refresh(structural: bool) -> void:
 	var ui = _group("UpgradeUI")
-	if ui != null and ui.has_method("update_ui") and not ui.has_meta("is_mirror"):
+	if ui == null or ui.has_meta("is_mirror"):
+		return
+	if ui.has_method("mp_request_refresh"):
+		ui.mp_request_refresh(structural)
+	elif structural and ui.has_method("update_ui"):
 		ui.update_ui()
 
 

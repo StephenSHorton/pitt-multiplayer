@@ -90,6 +90,9 @@ func flush() -> bool:
 	var msg := diff(_last, now)
 	if msg.is_empty():
 		return false
+	# money moved (sales, another player's spend): an open menu re-checks what is affordable
+	if msg.has("money_changed") and adapter != null and adapter.has_method("request_upgrade_ui_refresh"):
+		adapter.request_upgrade_ui_refresh(false)
 	msg.erase("money_changed")
 	msg["full"] = false
 	msg["money"] = now.money

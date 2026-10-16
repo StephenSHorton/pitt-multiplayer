@@ -124,3 +124,6 @@ func _carry_after_spawn(inst: RigidBody3D) -> void:
 
 func update_equipped_item_properties():
 	pass
+
+func apply_screenshake(intensity: float, duration: float):
+	calls.append(["apply_screenshake", intensity, duration])

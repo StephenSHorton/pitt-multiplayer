@@ -46,6 +46,9 @@ const BANK_MAX_TICKS := 3
 const META_REST_PER_TICK := 20
 const FOLLOW_DELAY_MS := 50
 const FOLLOW_KEEP := 12
+## a follower frame's time is the sender's spacing (held frame t_ms) laid over its
+## arrival, at most this far past it (frames that arrive in bursts still play evenly)
+const FOLLOW_SPREAD_MS := 100
 const ENTS_ROWS_PER_MSG := 200
 const META_ROWS_PER_MSG := 300
 const READY_RESEND_MS := 15000
@@ -124,6 +127,7 @@ class PeerState extends RefCounted:
 
 var bodies = null                 # the module (session, api, adapter, meta_sync, signals)
 var ents: Dictionary = {}         # eid -> Ent
+var _fclock := 0.0                # follower clock (ms), see _follow_now
 var tombs: Dictionary = {}        # eid -> until ms
 var awake: Dictionary = {}        # eid -> true
 var peers: Dictionary = {}        # peer -> PeerState
@@ -438,11 +442,20 @@ func follow(eid: int, peer: int) -> void:
 	_wake(e)
 
 
-func follow_push(eid: int, state: Dictionary, _t_ms: int) -> void:
+func follow_push(eid: int, state: Dictionary, t_ms: int) -> void:
 	var e: Ent = ents.get(eid, null)
 	if e == null or e.follow_peer == 0:
 		return
-	e.follow.append({"rx": _now(), "p": state.get("p", e.p), "q": state.get("q", e.q),
+	# 0.2.2: a kinematic follower that moves in uneven steps (frames arriving in bursts,
+	# or two physics ticks on one wall-clock ms) shakes what rests in it: a full crate
+	# spilled its ducks on the host. Frames play at the sender's spacing.
+	var rx := _follow_now()
+	if not e.follow.is_empty() and t_ms != 0:
+		var last: Dictionary = e.follow.back()
+		var dts := posmod(t_ms - int(last.get("t", 0)) + 0x80000000, 0x100000000) - 0x80000000
+		if int(last.get("t", 0)) != 0 and dts > 0 and dts < 500:
+			rx = clampi(int(last.rx) + dts, rx, rx + FOLLOW_SPREAD_MS)
+	e.follow.append({"rx": rx, "t": t_ms, "p": state.get("p", e.p), "q": state.get("q", e.q),
 		"l": state.get("l", Vector3.ZERO), "a": state.get("a", Vector3.ZERO)})
 	while e.follow.size() > FOLLOW_KEEP:
 		e.follow.pop_front()
@@ -615,7 +628,10 @@ func physics_step() -> void:
 
 func _physics_step() -> void:
 	var now := _now()
-	_drive_followers(now)
+	_fclock = (_fclock + 1000.0 / float(maxi(1, Engine.physics_ticks_per_second))) if _fclock > 0.0 else float(now)
+	if absf(_fclock - float(now)) > 100.0:
+		_fclock = float(now)
+	_drive_followers(int(_fclock))
 	_poll_meta(now)
 	if now - _last_flush_ms >= LIFECYCLE_MS:
 		_last_flush_ms = now
@@ -629,6 +645,12 @@ func _physics_step() -> void:
 		for eid in tombs.keys():
 			if int(tombs[eid]) < now:
 				tombs.erase(eid)
+
+
+## Follower clock (ms): exactly one physics tick per step, kept within 100 ms of the
+## wall clock, so a follower moves the same distance every tick (0.2.2).
+func _follow_now() -> int:
+	return int(_fclock) if _fclock > 0.0 else _now()
 
 
 func _drive_followers(now: int) -> void:

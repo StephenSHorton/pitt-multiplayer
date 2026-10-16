@@ -6,6 +6,7 @@ extends StaticBody3D
 
 var _rolling: bool = false
 var _remaining: float = 0.0
+var _hud: Node = null
 var stub_calls: Array = []
 ## tests: called with the method name inside every recorded stub call
 var stub_hook: Callable = Callable()

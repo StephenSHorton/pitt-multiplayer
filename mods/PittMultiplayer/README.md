@@ -82,7 +82,11 @@ crafting) reached the host.
 with ducks in it. On a client every object is a frozen copy driven by the host, and the
 frozen ducks held the crate down. Now everything in or on what a client carries moves with
 it on the client's screen, while the host's copies ride the host's crate; when it is put
-down they settle back onto the host's poses. Host and clients must all run 0.2.2.
+down they settle back onto the host's poses. Also in 0.2.2: a client's broom sweeps where
+the client looks (it swept to the left); the workbench progress bar, the trading
+terminal's result popup and bench camera shakes are only the operating player's; an open
+upgrade menu shows other players' purchases and money changes at once. Host and clients
+must all run 0.2.2.
 
 ## Known MP2 limitations
 
@@ -90,8 +94,7 @@ down they settle back onto the host's poses. Host and clients must all run 0.2.2
   runs them).
 - The vacuum's bag gauge on the holder's own view is approximate; another player's
   scrubbing of erasable text is not visible (the reward is shared).
-- Equipped poses of brooms, fans, remotes, golf clubs and cannons on other players use
-  a default hand offset.
+- A remote player's cannon shows no trajectory to that player.
 - Impact sounds of remote bodies come from local kinematic contacts and may differ
   from the host's.
 - Remote players have no weight on host bodies (they push, they do not press down),

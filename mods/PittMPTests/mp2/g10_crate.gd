@@ -7,6 +7,22 @@ extends RefCounted
 const POOL := "tool_box"
 ## where the host drops the ducks, in the crate's frame (inner 0.62 x 1.29 m)
 const DUCK_OFFSETS := [Vector3(0, 0.25, -0.38), Vector3(0, 0.25, 0.0), Vector3(0, 0.25, 0.38)]
+## "f": the crate filled up (the live report: it failed when "like full of ducks"),
+## 3 layers of 2 x 4, dropped layer by layer
+const FULL_LAYERS := [0.2, 0.5, 0.8]
+const FULL_X := [-0.14, 0.14]
+const FULL_Z := [-0.45, -0.15, 0.15, 0.45]
+## at least this many ducks must lie in the full crate before the grab
+const FULL_MIN := 18
+## the full crate's top layer sits above the walls: swinging it spills some, on the
+## host's physics and the client's alike (counted, not checked); the drop's convergence
+## check still compares every duck with the host
+const SPILL_OK := ["g10f_moved", "g10f_rest", "g10hf_held"]
+## lifting the full crate may drop a few of the top layer over the rim, on the host's
+## physics and the client's alike: at most this many per peer. The host player's own
+## carry of it (g10hf, the game alone) spills too (up to 6 of 16 seen): counted only.
+const SPILL_SOME := ["g10f_held"]
+const FULL_SPILL_MAX := 4
 ## the crate must rise at least this far when the carrier looks up
 const LIFT_M := 0.3
 
@@ -14,7 +30,7 @@ const LIFT_M := 0.3
 ## p (world) lies inside the crate's walls (crate.tscn: walls at x +-0.35 / z +-0.68, 0.64 m high).
 static func inside(crate: Node3D, p: Vector3) -> bool:
 	var l := crate.global_transform.affine_inverse() * p
-	return absf(l.x) <= 0.4 and absf(l.z) <= 0.75 and l.y >= -0.15 and l.y <= 0.9
+	return absf(l.x) <= 0.4 and absf(l.z) <= 0.75 and l.y >= -0.15 and l.y <= 1.3
 
 
 ## The bodies of `nodes` outside `crate`, as crate-frame positions ("gone" for freed ones).

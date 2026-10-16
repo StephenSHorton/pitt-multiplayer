@@ -88,3 +88,9 @@ func on_pool_spawn():
 
 func on_pool_recycle():
 	_stub("on_pool_recycle")
+
+func _process_idle(_delta: float) -> void:
+	_stub("_process_idle")
+
+func _hide_ball_indicator() -> void:
+	_stub("_hide_ball_indicator")

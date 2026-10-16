@@ -15,6 +15,7 @@ const GameplayClient = preload("gameplay_client.gd")
 const GrabHost = preload("grab_host.gd")
 const GrabClient = preload("grab_client.gd")
 const Dispenser = preload("dispenser.gd")
+const Coop = preload("coop_checks.gd")
 const GAMEPLAY_IDS := ["P8", "P2", "P3", "P12", "P10", "P11", "P1"]
 const GRAB_IDS := ["G1", "G3", "G2", "G4", "G6", "G10"]    # G5 (leaves the session) runs after the end checks
 
@@ -40,12 +41,22 @@ func run() -> void:
 		await _sub(GameplayHost).run_gameplay(_ids(GAMEPLAY_IDS))
 		if wants("D1"):
 			await _sub(Dispenser).run_host()
+		if wants("W1"):
+			await _sub(Coop).w1_host()
+		if wants("M1"):
+			await _sub(Coop).m1_host()
 		# the host spawns the test bodies at the client's avatar: wait until it stands still
 		await wait_peer_mark("client_positioned_grab", 120.0)
 		await sleep_ms(500)
 		await _sub(GrabHost).run_grab(_ids(GRAB_IDS))
 		if wants("B6"):
 			await _b6_host()
+		# T1 after B6: on a headless client the equipped broom floods the log with display
+		# server errors (2 per frame), which skews B6's timing measurements
+		if wants("T1"):
+			await wait_peer_mark("client_positioned_t1", 120.0)
+			await sleep_ms(500)
+			await _sub(Coop).t1_host()
 		# H1 (end): the client's HUD money label shows this value
 		await wait_peer_mark("hud_money_req", 120.0)
 		report.mark("hud_money_host", {"hud_money": money()})
@@ -76,6 +87,10 @@ func run() -> void:
 		await _sub(GameplayClient).run_gameplay(_ids(GAMEPLAY_IDS))
 		if wants("D1"):
 			await _sub(Dispenser).run_client()
+		if wants("W1"):
+			await _sub(Coop).w1_client()
+		if wants("M1"):
+			await _sub(Coop).m1_client()
 		# P10 and P1 each end a combo: the mirrored combo_ended reaches hud.show_result, which
 		# pays the bonus out locally (GameState.add_bonus); the money clamp reverts it in the
 		# same frame (MP2 P5; the host pays once)
@@ -85,6 +100,10 @@ func run() -> void:
 		await _sub(GrabClient).run_grab(_ids(GRAB_IDS))
 		if wants("B6"):
 			await _b6_client()
+		if wants("T1"):
+			await _to_open_floor()
+			report.mark("client_positioned_t1")
+			await _sub(Coop).t1_client()
 		report.mark("hud_money_req")
 		var hm: Dictionary = await wait_peer_mark("hud_money_host", 60.0)
 		await _check_hud_money("h1_end", String(hm.get("hud_money", "")))

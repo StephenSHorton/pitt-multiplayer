@@ -72,3 +72,9 @@ func calculate_collision_volume(impact_force: float) -> float:
 func get_reset_basis() -> Basis:
 	_stub("get_reset_basis")
 	return Basis.IDENTITY
+
+func _update_preview() -> void:
+	_stub("_update_preview")
+
+func _clear_preview() -> void:
+	_stub("_clear_preview")

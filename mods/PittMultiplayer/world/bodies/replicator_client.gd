@@ -776,7 +776,7 @@ func _carry_box(cb: PuppetBody, cn: Node3D) -> AABB:
 	var first := true
 	for c in cn.find_children("*", "CollisionShape3D", true, false):
 		var cs := c as CollisionShape3D
-		if cs.shape == null or cs.disabled:
+		if cs.shape == null or cs.disabled or _shape_owner(cs) != cn:
 			continue
 		var a: AABB = (inv * cs.global_transform) * cs.shape.get_debug_mesh().get_aabb()
 		box = a if first else box.merge(a)
@@ -788,6 +788,14 @@ func _carry_box(cb: PuppetBody, cn: Node3D) -> AABB:
 	cb.box = box
 	cb.has_box = true
 	return box
+
+
+## The collision object a shape belongs to (an Area3D child's shapes are the area's).
+static func _shape_owner(cs: Node) -> Node:
+	var n := cs.get_parent()
+	while n != null and not (n is CollisionObject3D):
+		n = n.get_parent()
+	return n
 
 
 func is_local_sim(eid: int) -> bool:

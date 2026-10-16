@@ -197,12 +197,19 @@ func _g5() -> void:
 
 func _g10_inside(tag: String, crate: Node3D, ducks: Array) -> bool:
 	var out := Crate.outside(crate, ducks)
+	if tag in Crate.SPILL_OK:
+		report.value(tag + "_client_spilled", out.size())
+		return true
+	if tag in Crate.SPILL_SOME:
+		report.value(tag + "_client_spilled", out.size())
+		return report.check(tag + "_client_ducks_inside_but_top_spill", not ducks.is_empty() and out.size() <= Crate.FULL_SPILL_MAX,
+			"%d of %d outside (crate frame) %s" % [out.size(), ducks.size(), str(out)])
 	return report.check(tag + "_client_ducks_inside", not ducks.is_empty() and out.is_empty(), "outside (crate frame) %s" % str(out))
 
 
 func _g10() -> void:
 	report.begin("G10_crate_with_ducks")
-	for phase in ["e", "d"]:
+	for phase in ["e", "d", "f"]:
 		var tag: String = "g10" + phase
 		var m: Dictionary = await wait_peer_mark(tag + "_ready", 90.0)
 		var eid := int(m.get("g10_eid", 0))
@@ -217,9 +224,10 @@ func _g10() -> void:
 			await wait_for(func(): return bodies().node_of(int(de)) != null, 3.0)
 			if bodies().node_of(int(de)) != null:
 				ducks.append(bodies().node_of(int(de)))
-		if phase == "d":
-			report.check("g10d_all_duck_puppets", ducks.size() == Crate.DUCK_OFFSETS.size(), "%d" % ducks.size())
-			_g10_inside("g10d_before", crate, ducks)
+		if phase != "e":
+			report.check(tag + "_all_duck_puppets", ducks.size() == (m.get("g10_ducks", []) as Array).size() and not ducks.is_empty(),
+				"%d" % ducks.size())
+			_g10_inside(tag + "_before", crate, ducks)
 		var y0 := crate.global_position.y
 		var c0: Dictionary = grab().counters()
 		var picked: bool = await Crate.grab_by_input(self, crate, tag)
@@ -235,9 +243,9 @@ func _g10() -> void:
 			"revoked": int(c1.get("grab_revoked", 0)) - int(c0.get("grab_revoked", 0)), "dy": crate.global_position.y - y0})
 		report.check(tag + "_client_still_holding", holding, "")
 		report.check(tag + "_client_lifted", crate.global_position.y - y0 >= Crate.LIFT_M, "dy %.3f m" % (crate.global_position.y - y0))
-		if phase == "d":
+		if phase != "e":
 			_g10_inside(tag + "_held", crate, ducks)
-			await shot("mp2-g10-client-lifts-crate-with-ducks")
+			await shot("mp2-g10%s-client-lifts-crate-with-ducks" % phase)
 		# what the held crate touches (the game turns contact_monitor on while carrying)
 		var contacts: Array = []
 		for b in crate.get_colliding_bodies():
@@ -249,7 +257,7 @@ func _g10() -> void:
 		await Crate.swing(self)
 		await sleep_ms(500)
 		report.check(tag + "_client_holding_after_swing", cam().picked_object == crate, "")
-		if phase == "d":
+		if phase != "e":
 			_g10_inside(tag + "_moved", crate, ducks)
 		report.mark(tag + "_moved")
 		await sleep_ms(600)
@@ -273,24 +281,27 @@ func _g10() -> void:
 		ok = await wait_for(func(): return not rest.is_empty() and far.call() <= 0.05, 3.0)
 		report.check(tag + "_client_converged_5cm", ok, "worst %.3f m" % far.call())
 		report.check(tag + "_puppet_again", not bodies().is_local_sim(eid), "")
-		if phase == "d":
+		if phase != "e":
 			_g10_inside(tag + "_rest", crate, ducks)
 		report.mark(tag + "_checked")
-		if phase == "d":
-			await _g10_host_control(eid, crate, ducks)
+		if phase != "e":
+			var inside_now := ducks.filter(func(dn): return is_instance_valid(dn) and Crate.inside(crate, (dn as Node3D).global_position))
+			await _g10_host_control(eid, crate, inside_now, "g10h" if phase == "d" else "g10hf")
 	await wait_peer_mark("g10_end", 30.0)
 
 
 ## Control: the host grabs the crate; this client sees it rise with the ducks inside.
-func _g10_host_control(eid: int, crate: Node3D, ducks: Array) -> void:
-	var hv: Dictionary = await wait_peer_mark("g10h_holding", 40.0)
+func _g10_host_control(eid: int, crate: Node3D, ducks: Array, h: String) -> void:
+	var hv: Dictionary = await wait_peer_mark(h + "_holding", 40.0)
 	var hp := Crate.vec(hv.get("g10_pos", []))
-	if report.check("g10h_host_holding_mark", hp != Vector3.INF, ""):
-		var ok: bool = await wait_for(func(): return crate.global_position.distance_to(hp) <= 0.1, 2.0)
-		report.check("g10h_client_sees_crate_lifted", ok, "%.3f m off" % crate.global_position.distance_to(hp))
-		report.check("g10h_client_row_host_held", grab().owner_of(eid) == 1 and grab().hold_kind(eid) == "held", "owner %d kind %s" % [
+	if report.check(h + "_host_holding_mark", hp != Vector3.INF, ""):
+		# (a full crate still sways in the host's hands: the pose in the mark is one instant of it)
+		var tol := 0.1 if h == "g10h" else 0.25
+		var ok: bool = await wait_for(func(): return crate.global_position.distance_to(hp) <= tol, 2.0)
+		report.check(h + "_client_sees_crate_lifted", ok, "%.3f m off (tolerance %.2f)" % [crate.global_position.distance_to(hp), tol])
+		report.check(h + "_client_row_host_held", grab().owner_of(eid) == 1 and grab().hold_kind(eid) == "held", "owner %d kind %s" % [
 			grab().owner_of(eid), grab().hold_kind(eid)])
-		_g10_inside("g10h_held", crate, ducks)
+		_g10_inside(h + "_held", crate, ducks)
 		await shot("mp2-g10-client-sees-host-carry-ducks")
-	report.mark("g10h_checked")
-	await wait_peer_mark("g10h_released", 20.0)
+	report.mark(h + "_checked")
+	await wait_peer_mark(h + "_released", 20.0)

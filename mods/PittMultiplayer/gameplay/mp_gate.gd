@@ -25,6 +25,12 @@ static var gp: Object = null
 ## host: the peer a host_exec call runs for (0 = not inside host_exec)
 static var exec_peer: int = 0
 static var _scope: int = 0
+## instance id of the bench whose progress bar the LOCAL player sees (0 = none): the
+## game has one HUD bar (group WorkbenchProgress) that every bench writes (0.2.2)
+static var bar_bench: int = 0
+## true while a bench ejects for someone else: the camera shake is the operator's
+## (main_camera_interact_ext.apply_screenshake)
+static var shake_mute := false
 
 
 static func live() -> bool:
@@ -89,6 +95,8 @@ static func reset() -> void:
 	gp = null
 	exec_peer = 0
 	_scope = 0
+	bar_bench = 0
+	shake_mute = false
 
 
 static func _args(arg) -> Array:
@@ -185,6 +193,39 @@ static func bench_release(node: Object) -> bool:
 	if not is_host():
 		return true
 	return bool(gp.bench_release(node, _holder_peer()))
+
+
+## The local player operates (holds craft on) this bench: the bench's progress bar,
+## eject shake and other operator feedback are theirs (0.2.2). Outside a session: true.
+static func bench_operated_here(node: Object) -> bool:
+	if not live() or node == null or not is_instance_valid(node):
+		return true
+	if is_host():
+		return bool(gp.bench_held_by(node, 1))
+	return bool(gp.interact_client.holding(node))
+
+
+## show_progress_bar of a bench: true = call the game's (show / hide the HUD bar).
+## Shown only for the bench the local player operates; hidden only by the bench that
+## showed it (another player's bench finishing never hides ours).
+static func bench_bar_show(node: Object, on: bool) -> bool:
+	if not live():
+		return true
+	var id := node.get_instance_id()
+	if on:
+		if not bench_operated_here(node):
+			return false
+		bar_bench = id
+		return true
+	if bar_bench != id:
+		return false
+	bar_bench = 0
+	return true
+
+
+## update_progress_bar of a bench: true = call the game's.
+static func bench_bar_value(node: Object) -> bool:
+	return not live() or bar_bench == node.get_instance_id()
 
 
 static func _holder_peer() -> int:

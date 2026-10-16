@@ -344,6 +344,10 @@ func bench_release(node: Object, peer: int) -> bool:
 	return false
 
 
+func bench_held_by(node: Object, peer: int) -> bool:
+	return bool((_holders.get(_bench_key(node), {}) as Dictionary).has(peer))
+
+
 func _bench_key(node: Object) -> int:
 	var eid := eid_of(node)
 	return eid if eid > 0 else -int(node.get_instance_id())

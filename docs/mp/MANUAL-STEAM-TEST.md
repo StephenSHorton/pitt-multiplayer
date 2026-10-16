@@ -190,7 +190,17 @@ this checks them over Steam between two real players.
 13. **The 0.2.1 bug (crate with ducks).** A buys a crate (box tool) and drops three or
     four ducks into it. B picks the crate up and walks around with it: it lifts at once
     and the ducks stay in it on both screens. B puts it down: on both screens the crate
-    and the ducks end up in the same place. Repeat with A carrying while B watches.
+    and the ducks end up in the same place. Repeat with A carrying while B watches. Then fill
+    the crate to the brim and repeat (a few ducks on top may fall out when swinging it, the
+    same on both screens).
+14. **Broom (0.2.2).** B equips a broom (equip upgrade) and sweeps ducks while facing several
+    directions: they fly where B looks, on both screens.
+15. **Operator-only feedback (0.2.2).** B holds left click at the manual duck workbench: B
+    sees the progress bar, A does not; then the reverse. B rolls at the trading terminal: the
+    result popup shows on B's screen only, the terminal's labels change for both.
+16. **Upgrade menu (0.2.2).** B opens the upgrade terminal and keeps it open; A buys an
+    upgrade: B's row level, price and the available funds change without closing the menu.
+    Then the reverse.
 
 ## Reporting
 

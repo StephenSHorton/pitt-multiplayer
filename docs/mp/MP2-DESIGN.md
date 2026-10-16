@@ -330,6 +330,12 @@ puppets resting on the crate's floor, and a kinematic body never yields. Riders 
 `""`, no HELD flag, not hidden); one that the host reports held or hidden leaves at once. When the carry ends
 (the carried body is a puppet again) every rider returns to puppet mode like `set_local_sim(eid, false,
 newest epoch)`: a 150 ms blend to the host pose. Nothing is sent for riders.
+On the host the riders ride the kinematic follower (3.3 `host_follow`), which therefore has to move evenly:
+follower frames play at the sender's spacing (held frame `t_ms`, at most 100 ms past their arrival) on a
+clock that advances exactly one physics tick per step. With arrival times and the wall clock, frames that
+came in bursts moved the follower in uneven steps and a full crate shook its ducks out (a Jolt check: a
+kinematic box lifting 24 ducks 1 m in 0.5 s keeps 24 when it moves every tick, 17 when it moves every other
+tick).
 
 **Stray guard (`world/bodies/stray_guard.gd`).** Every physics frame (priority 101) and every process frame,
 the client compares `Σ pool.active.size()` with its puppet + local_sim count and, on a mismatch, diffs the
@@ -705,9 +711,13 @@ call.
 
 - On `owner_changed(eid, P, "equipped")` the host calls `node.equip(rig_P)` in host exec: the game's own equip
   zeroes collision and reparents the tool under the rig. Each frame `rigs.gd` sets the tool's local transform
-  from its `equipped_offset`/`equipped_rotation_deg` (or a default `(0.35, -0.3, -0.7)` for the groups
-  `broom`, `fan`, `remote`, `golf_club`, `cannon`, whose poses `main_camera.update_equipped_item_properties`
-  hard-codes for the local camera only).
+  the way `main_camera.update_equipped_item_properties` does for the local camera: the hard-coded poses of
+  the groups `broom`, `fan`, `remote`, `golf_club`, then `equipped_offset`/`equipped_rotation_deg` (0.2.2:
+  before, the broom kept `equip()`'s built-in -90 degree yaw on a rig, so its push axis, `basis.z`, and its
+  sweep area pointed to the player's left).
+- Operator feedback of a tool on a rig is not drawn on the host (0.2.2): the broom's outlines and trajectory
+  (`_update_preview`), the cannon's trajectory (`_should_show_trajectory`) and the golf club's ball
+  indicator (`_process_idle`); the club on a rig also ignores the host player's mouse (`_input`).
 - Every other peer (host included) therefore sees the **real tool entity** floating at P's hands: the host
   streams its pose like any body, flagged `NOCOLLIDE`. This is the "equipped proxy on the puppet" with no
   extra model and no dependency on `puppet.gd`.
@@ -1232,7 +1242,10 @@ transport conditioner. Screenshots go to `dist/screens/mp2-*.png`.
 | G7 | **Throw ducks into the maw** (with P1) | money, stats and nutrition counted once each |
 | G8 | G1 under 100 ms ± 30 ms, 5 % loss | landing within 1 m; no stuck ownership |
 | G9 | Place a sticky panel | host panel placed STATIC, pose ±1 cm |
-| G10 | **Client lifts the CRATE tool with ducks inside** (0.2.2, real input path: interact ray + LMB) | empty and with 3 ducks: granted, no deny, the crate rises ≥ 0.3 m on both peers, the host copy within 15 cm of the client pose, the ducks stay inside it on both while lifted and swung; after the drop the client converges within 5 cm; control: the host lifts it, the client sees it raised with the ducks inside |
+| W1 | Manual duck workbench: the HUD progress bar is the operator's (0.2.2) | the client crafts: its bar shows, the host's stays hidden; the host crafts: its bar shows, the client's stays hidden |
+| M1 | Open upgrade menu follows another player's purchase (0.2.2) | the client's open menu shows the host's purchase (row level / price) and a money-only change (credits) without reopening; the host's open menu shows a client's purchase |
+| T1 | Client's equipped broom sweeps along its facing (0.2.2) | at 4 yaws: the rig copy pushes along the rig's view (dot > 0.9) and a duck 2.6 m in front moves >= 0.2 m within 35 degrees of the facing |
+| G10 | **Client lifts the CRATE tool with ducks inside** (0.2.2, real input path: interact ray + LMB) | empty, with 3 ducks and full (24 dropped in 3 layers, >= 18 inside; lifting it may drop <= 4 of the top layer, on both peers alike): granted, no deny, the crate rises ≥ 0.3 m on both peers, the host copy within 15 cm of the client pose, the ducks stay inside it on both while lifted and swung; after the drop the client converges within 5 cm; control: the host lifts it, the client sees it raised with the ducks inside |
 
 **Integration (all streams):** I1 = P1 + G7 + B4 in one session with a late joiner during the feeding; I2 =
 I1 with `-HostLive` (real game host, launch stage only).
@@ -1285,7 +1298,7 @@ co-op workbench; combo shown on both; `mp stats` under 50 KB/s per client; late 
 - Tool effects of an equipped tool reach the holder one round trip late (the host runs them).
 - The vacuum's bag gauge on the holder's own view is approximate; another player's scrubbing of erasable
   text is not visible (the reward is shared).
-- Equipped poses of brooms, fans, remotes, golf clubs and cannons on other players use a default hand offset.
+- A remote player's cannon shows no trajectory to that player (the client never holds the loaded queue).
 - Impact sounds of remote bodies come from local kinematic contacts and may differ from the host's.
 - Remote players have no weight on host bodies (they push, they do not press down), except the weight plate
   (D18).

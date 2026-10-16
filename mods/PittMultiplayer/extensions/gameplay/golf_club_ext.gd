@@ -7,9 +7,20 @@ const G = preload("../../gameplay/mp_gate.gd")
 
 
 func _input(event: InputEvent) -> void:
+	# host: a club on a remote player's rig never takes the host player's mouse (0.2.2)
+	if G.remote_owned(self):
+		return
 	G.begin_input_scope()
 	super(event)
 	G.end_input_scope()
+
+
+## Host: the ball indicator of a remote player's club is that player's own feedback.
+func _process_idle(delta: float) -> void:
+	if G.remote_owned(self):
+		_hide_ball_indicator()
+		return
+	super(delta)
 
 
 func _fire_shot() -> void:

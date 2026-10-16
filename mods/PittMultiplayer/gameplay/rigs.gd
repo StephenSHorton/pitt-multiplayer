@@ -10,9 +10,16 @@ extends RefCounted
 
 const EXTRAP_MAX_S := 0.15
 const AIM_HOLD_MS := 200
-const DEFAULT_OFFSET := Vector3(0.35, -0.3, -0.7)
-## main_camera.update_equipped_item_properties hard-codes these poses for the local camera only
-const DEFAULT_POSE_GROUPS := ["broom", "fan", "remote", "golf_club", "cannon"]
+## main_camera.update_equipped_item_properties poses these groups for the local camera
+## only (every frame); a rig copies it, in the same order: group -> [position, rotation deg].
+## Every other tool uses its own equipped_offset / equipped_rotation_deg, like the game.
+## (0.2.2: the broom kept equip()'s built-in rotation on a rig and swept to the left.)
+const GROUP_POSES := [
+	["broom", Vector3(0.4, -1.0, -1.5), Vector3(0, 180, 0)],
+	["fan", Vector3(0, -1.0, -1.0), Vector3(0, 90, 0)],
+	["remote", Vector3(0.3, -0.3, -0.5), Vector3(0, 90, 50)],
+	["golf_club", Vector3(0.5, -0.8, -1.2), Vector3(0, 180, 0)],
+]
 
 var gp = null
 var _rigs: Dictionary = {}          # peer -> Camera3D
@@ -136,16 +143,15 @@ func _hand_pose(n: Node) -> void:
 	if not (n is Node3D):
 		return
 	var n3 := n as Node3D
+	for gpose in GROUP_POSES:
+		if n3.is_in_group(String(gpose[0])):
+			n3.position = gpose[1]
+			n3.rotation_degrees = gpose[2]
+			return
 	if "equipped_offset" in n3:
 		n3.position = n3.get("equipped_offset")
-		if "equipped_rotation_deg" in n3:
-			n3.rotation_degrees = n3.get("equipped_rotation_deg")
-		return
-	for g in DEFAULT_POSE_GROUPS:
-		if n3.is_in_group(g):
-			n3.position = DEFAULT_OFFSET
-			n3.rotation = Vector3.ZERO
-			return
+	if "equipped_rotation_deg" in n3:
+		n3.rotation_degrees = n3.get("equipped_rotation_deg")
 
 
 func on_owner_changed(eid: int, owner_peer: int, kind: String, _epoch: int) -> void:

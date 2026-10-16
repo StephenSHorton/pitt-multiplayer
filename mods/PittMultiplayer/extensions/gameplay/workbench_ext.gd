@@ -14,9 +14,10 @@ func start_crafting():
 
 
 func stop_crafting():
-	if G.bench_stop(self):
-		return
-	if not G.bench_release(self):
+	if G.bench_stop(self) or not G.bench_release(self):
+		# released here while it keeps crafting (another player still holds): our bar goes
+		if not G.bench_operated_here(self):
+			show_progress_bar(false)
 		return
 	super()
 
@@ -24,4 +25,19 @@ func stop_crafting():
 func craft_item():
 	if G.sink(self):
 		return
+	# the eject shake is the operator's; a remote operator gets it with the fx (0.2.2)
+	G.shake_mute = not G.bench_operated_here(self)
 	super()
+	G.shake_mute = false
+	G.fx("bench_eject", self)
+
+
+## 0.2.2: the HUD progress bar is the operator's only (MP2 4.4, mp_gate.bench_bar_show).
+func show_progress_bar(visible_: bool):
+	if G.bench_bar_show(self, visible_):
+		super(visible_)
+
+
+func update_progress_bar(value: float):
+	if G.bench_bar_value(self):
+		super(value)

@@ -2080,6 +2080,9 @@ func _host_buy(ctx, f: Callable, args: Dictionary) -> Variant:
 	if not bool(r.get("ok", false)):
 		return ctx.fail(String(r.get("error", "refused")), String(r.get("code", "ERR_FAILED")))
 	var value = r.get("value", {})
+	# the host's own open menu shows a client's purchase at once (0.2.2)
+	if ctx.is_remote and adapter.has_method("request_upgrade_ui_refresh"):
+		adapter.request_upgrade_ui_refresh(true)
 	# MP1 (private worlds) told the buyer to spawn the item with a "grant". MP2
 	# (3.8, D11): the item spawns once on the host and replicates as an entity.
 	if not mp2_active() and ctx.is_remote and ctx.origin_peer != 1 and typeof(value) == TYPE_DICTIONARY \

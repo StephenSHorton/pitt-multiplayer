@@ -149,10 +149,16 @@ static func apply_cauldron(n: Object, cur: Dictionary, prev: Dictionary) -> void
 			n.set("ritual_elapsed", 0.0)
 			if n.has_method("_reveal_black_sphere"):
 				n._reveal_black_sphere()
+			# the ritual's bar is the operator's (the host shows its own in _start_ritual)
+			if n.has_method("show_progress_bar"):
+				n.show_progress_bar(true)
+				n.update_progress_bar(0.0)
 		-1:
 			n.set("is_ritualizing", false)
 			if n.has_method("_collapse_black_sphere"):
 				n._collapse_black_sphere()
+			if n.has_method("show_progress_bar"):
+				n.show_progress_bar(false)
 
 
 # ------------------------------------------------------------------ trading terminal

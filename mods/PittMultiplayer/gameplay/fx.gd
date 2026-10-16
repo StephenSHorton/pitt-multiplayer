@@ -10,6 +10,8 @@ extends RefCounted
 ## apply scope. Effects whose target is unknown on the client are dropped
 ## (counted), except those that only need a position.
 
+const G = preload("mp_gate.gd")
+
 var gp = null
 var _ctr := {"fx_tx": 0, "fx_rx": 0, "fx_dropped": 0, "fx_applied": 0}
 var applied_kinds: Array = []      # tests: kinds applied on this client (last 64)
@@ -183,6 +185,40 @@ func _apply_one(e: Dictionary) -> bool:
 			if cam != null and cam.get("picked_object") == n:
 				a.release_held_object()
 			n.queue_free()
+			return true
+		"roll_result":
+			# the trading terminal's result (_resolve runs on the host); the HUD popup
+			# only for the player who rolled (0.2.2)
+			var mult := float(args.get("mult", 0.0))
+			var payout := int(args.get("payout", 0))
+			var col: Color = n._mult_color(mult) if payout > 0 and n.has_method("_mult_color") else n.C_RED
+			var texts := {"timer_label": "%.3f" % float(args.get("stop", 0.0)), "multiplier_label": "x%.1f" % mult,
+				"gains_label": String(n.TXT_BUST) if payout <= 0 else "+ " + String(n._fmt_money(payout))}
+			for ln in texts:
+				var l = n.get(ln)
+				if l is Label3D or l is Label:
+					l.text = texts[ln]
+					l.modulate = col
+			if n.has_method("_play"):
+				n._play(n.get("sfx_cash") if payout > 0 else n.get("sfx_bust"))
+			if payout > 0 and n.has_method("_burst"):
+				n._burst(n.get("reward_particles"))
+			if n.has_method("_update_button_label"):
+				n._update_button_label()
+			var hud = a.hud()
+			if int(args.get("peer", 0)) == int(gp.my_peer_id()) and hud != null and hud.has_method("show_roll_result"):
+				hud.show_roll_result(mult, payout)
+			return true
+		"bench_eject":
+			# the duck bench's eject (craft_item runs on the host): sounds for everyone, the
+			# camera shake for the player operating it (0.2.2)
+			for an in ["press_player_audio_3d", "spawn_player_audio_3d"]:
+				var ap = n.get(an)
+				if ap is AudioStreamPlayer3D:
+					(ap as AudioStreamPlayer3D).play()
+			var mc = a.main_camera()
+			if mc != null and mc.has_method("apply_screenshake") and G.bench_operated_here(n):
+				mc.apply_screenshake(float(n.get("eject_shake_intensity")), float(n.get("eject_shake_duration")))
 			return true
 		"press_start":
 			if n.has_method("start_pressing") and not bool(n.get("is_pressing")):

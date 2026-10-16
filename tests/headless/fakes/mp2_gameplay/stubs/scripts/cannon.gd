@@ -118,3 +118,7 @@ func get_queue_save_data() -> Array:
 
 func apply_loaded_queue(queue_data: Array) -> void:
 	_stub("apply_loaded_queue")
+
+func _should_show_trajectory() -> bool:
+	_stub("_should_show_trajectory")
+	return false

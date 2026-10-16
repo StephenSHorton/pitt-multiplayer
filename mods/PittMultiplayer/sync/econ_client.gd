@@ -24,6 +24,7 @@ var reverts: Array = []     # the last 8 reverted local writes {local, host, ms}
 var stats_applied := 0
 var _ui_dirty := false
 var _ui_last_ms := 0
+var _money_dirty := false
 var _host_money := ""
 var _clamp_signal_connected := false
 var _clamp_sig: Signal
@@ -59,9 +60,13 @@ func on_econ(msg: Dictionary) -> void:
 	var po = msg.get("purchased_once", {})
 	if typeof(po) == TYPE_DICTIONARY and (full or not po.is_empty()):
 		adapter.set_purchased_once(po, full)
+		_money_dirty = true
 	var money := String(msg.get("money", ""))
 	if s_valid(money):
-		_host_money = s_norm(money)
+		var m := s_norm(money)
+		if m != _host_money:
+			_money_dirty = true
+		_host_money = m
 		adapter.set_money(_host_money)
 	if msg.has("bank") and adapter.has_method("set_bank") and float(msg.bank) >= 0.0:
 		adapter.set_bank(float(msg.bank))
@@ -83,14 +88,16 @@ func on_econ(msg: Dictionary) -> void:
 	_connect_clamp()
 
 
-## Refreshes the terminal at most every 250 ms after mirrored items changed;
-## the money clamp also runs here (process frames).
+## An open upgrade menu follows mirrored items (rebuild) and money (in place),
+## coalesced to once per frame (0.2.2); the money clamp also runs here (process frames).
 func tick(now_ms: int) -> void:
 	clamp_money()
-	if _ui_dirty and now_ms - _ui_last_ms >= 250:
-		_ui_dirty = false
+	if _ui_dirty or _money_dirty:
 		_ui_last_ms = now_ms
-		adapter.refresh_upgrade_ui()
+		if adapter.has_method("request_upgrade_ui_refresh"):
+			adapter.request_upgrade_ui_refresh(_ui_dirty)
+		_ui_dirty = false
+		_money_dirty = false
 
 
 ## P5: any local money write is reverted to the host's value. true = reverted.

@@ -6,6 +6,7 @@ extends Control
 
 const COLOR_RED := Color("#ff0000")
 const COLOR_DIM := Color("#00cc00")
+const COLOR_GREEN := Color("#00ff00")
 
 @export var buy_sound: AudioStream
 @export var error_sound: AudioStream
@@ -121,3 +122,5 @@ func _enhanced_shake_node(_node: Control):
 func _spawn_floating_text(_origin_node: Control, text: String, _color: Color):
 	feedback.append(text)
 
+func _refresh_upgrade_row(_row: HBoxContainer):
+	calls.append("_refresh_upgrade_row")

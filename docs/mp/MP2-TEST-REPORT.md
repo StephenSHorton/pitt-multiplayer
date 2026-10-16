@@ -1,6 +1,8 @@
 # MP2 test report (2026-10-15)
 
-## 0.2.2: the second two-PC Steam test (client could not pick up a crate with ducks in it)
+## 0.2.2: the second two-PC Steam test
+
+### Client could not pick up a crate with ducks in it
 
 **Report.** 0.2.1 over real Steam, world traffic healthy (host log: ch3 both ways, `drops {}`):
 "he [the client] can't pick up the crate tool when there's ducks in it".
@@ -45,13 +47,127 @@ covers the riders in the one-process rig. The loopback runner now fails a run wh
 log shows a GDScript parse / compile error (a scenario file that does not compile was
 skipped silently).
 
-**Final runs (0.2.2):** headless 427 passed / 0 failed; `-Suite all` decomp (MP1 host 38/38,
-client 34/34; MP2 host 126/126, client 138/138); `-Suite all -SteamLanes 4` the same counts.
-The real save folder check flagged `savegame.save`, `profile.cfg`, `pittapi.log` and
-`mp_session_last.json` in three of the four runs: the real game was being played (as a
-host) on this PC during the runs and saved / quit at 21:42; the decomp instances passed the
-T0 gate (user dir `PittMP-Dev`) every time. Not run: `-HostLive` / `-ClientLive` (the real
-game was in use).
+**Full crate (follow-up report: "it fails when it's like full of ducks").** G10 phase "f" drops 24
+ducks in three layers (2 x 4; the top layer is above the walls), 23 to 24 of them inside. Before the
+rider fix it failed like 3 ducks (dy 0.000 m / 0.001 m on host and client). With riders alone the client
+lifted it with every duck inside, but the host's copy lost 8 of them during the lift: the kinematic
+follower moved in uneven steps (frames timed by their arrival, which comes in bursts, and two physics
+ticks can share one wall-clock ms), and an uneven kinematic lift shakes a pile out. A Jolt check in a
+scratch project (a kinematic crate lifting 24 ducks 1 m in 0.5 s): moving every tick keeps 24, every
+other tick 17, two steps every fourth tick 0 to 19. The follower now plays the frames at the sender's
+spacing on a clock that advances one physics tick per step (`replicator_host.gd` `follow_push`,
+`_follow_now`). After: lifted 0.96 m on both, host copy within 4 cm; lifting drops 0 to 3 of the top
+layer (it sits above the walls) over the rim, the same on host and client (checked: at most 4 per peer);
+swinging spills 1 to 3 more; after the drop host and client agree on every duck within 5 cm. The host
+player's own carry of the same full crate (the game alone, control "g10hf") is checked the same way.
+
+### 0.2.2: the client's broom swept to the left
+
+**Root cause.** `broom.gd:192` pushes along the broom's own `basis.z`, and its SweepArea sits in front
+along the same axis. `equip()` leaves the broom at `equipped_rotation` (0, -90, 0); the game turns it
+to (0, 180, 0) every frame in `main_camera.update_equipped_item_properties`, for the local camera only.
+On the host the client's broom sits on the client's rig, where `rigs.gd` `_hand_pose` returned early for
+anything with `equipped_offset` (all of broom, fan, remote, golf club, cannon), so the group poses were
+never applied and the broom kept the -90 degree yaw: push axis and sweep area to the player's left. The
+rig's yaw and pitch were right. **Fix:** `_hand_pose` applies the game's group poses first (broom, fan,
+remote, golf club), then `equipped_offset` / `equipped_rotation_deg`. The fan and the remote on rigs
+were posed wrong by the same branch.
+
+| T1 (host checks, client yaw) | Before | After |
+|---|---|---|
+| broom push axis vs rig view (dot) | 0.00 at every yaw | 1.00 |
+| duck 2.6 m in front, yaw 0 / 1.3 / 2.6 / 4.2 | moved 0 / 0 / 4.08 m (at 78 deg) / 0 m | 2.74 / 3.62 / 4.00 / 4.06 m at 1.3 / 6.1 / 1.4 / 1.7 deg |
+
+### 0.2.2: operator-only feedback (the workbench bar showed for everyone)
+
+**Root cause.** The game has one HUD progress bar (`world.tscn` `ProgressBar`, group
+`WorkbenchProgress`); every bench's `show_progress_bar` / `update_progress_bar` writes it without asking
+who crafts. In MP2 `start_crafting` runs on every peer: on the host for a remote holder (host_exec) and
+on every client from the replayed `is_crafting`. So the host saw the bar for a client's craft and every
+client saw it for anyone's craft (also for a proxy intern's, whose `auto_crafter` meta is host-only); and
+any bench finishing hid the operator's bar. **Fix:** `mp_gate.bench_bar_show` / `bench_bar_value`: a bench
+shows the bar only if the local player holds craft on it (host: the holder set has peer 1; client:
+`interact_client.holding`), and only the bench that showed it may update or hide it; a release while
+another player keeps crafting hides the releaser's bar. Applied to the duck, cash, pinata benches and the
+cauldron (whose ritual bar now shows for the operating client too).
+
+| W1 | Before | After |
+|---|---|---|
+| host's bar while the client crafts | visible | hidden |
+| client's bar while the host crafts | visible | hidden |
+| operator's own bar (client / host) | shown | shown |
+
+**Audit** (decomp scripts and scenes; shared world result vs the operator's feedback). Fixed = changed in
+0.2.2; "no" items are listed for a later release.
+
+| Item | Game file | Decision | Fixed |
+|---|---|---|---|
+| Manual duck / cash / pinata bench HUD progress bar | `workbench.gd:70,84,102,326`, `manual_cash_workbench.gd:130,159,195,499`, `manual_pinata_workbench.gd:229,247,288,734` | operator only | yes |
+| Proxy-intern-driven manual bench bar | `proxy_intern.gd:153`, `workbench.gd:361` | nobody (as in SP) | yes (holder gate) |
+| One shared HUD bar: another bench's stop hides ours | `workbench.gd:84,333` | the operator's bench only | yes |
+| Cauldron ritual bar | `anomaly_workbench.gd:397,492,578,1102` | operator only (was host-only for everyone's ritual, never on the operating client) | yes |
+| Duck bench eject camera shake | `workbench.gd:250` (craft_item, host) | operator only | yes (muted on the host for a remote craft; the client operator gets it with fx `bench_eject`) |
+| Duck bench eject press / spawn sounds | `workbench.gd:244-248` | shared | yes (fx `bench_eject`) |
+| Cash / pinata eject camera shake | `manual_cash_workbench.gd:417`, `manual_pinata_workbench.gd:644` (animation on every peer) | operator only | yes |
+| Auto bench eject shakes | `automatic_cash_workbench.gd:559`, `automatic_pinata_workbench.gd:703` | shared (a machine) | n/a (unchanged) |
+| Cauldron ritual / effigy shakes | `anomaly_workbench.gd:1080,1576` (host only) | operator | no (host shakes for a remote ritual) |
+| Broom outlines + trajectory preview on a remote player's broom | `broom.gd:111-127,333` | operator only | yes (not drawn on the host) |
+| Cannon trajectory of a remote player's cannon | `cannon.gd:252,759` | operator only | host side yes; the operating client still sees none (no client queue) |
+| Golf club ball indicator / aim mode on a remote player's club | `golf_club.gd:161-222` | operator only | yes (the host's mouse no longer drives a remote club) |
+| Trading terminal result labels, cash / bust sound, particles | `gambling_terminal.gd:191-215` (`_resolve`, host only) | shared | yes (fx `roll_result`) |
+| Trading terminal roll-result HUD popup | `hud.gd:960` via `gambling_terminal.gd:218` | the roller only (was the host for every roll) | yes |
+| Trading terminal lever / button animation and sounds | `gambling_terminal.gd:145-159,494-557` | shared | no (host only) |
+| Hold-to-sweep HUD bar, interact prompts, hover outlines, crosshair hints | `interact_ray.gd:204-305,468-517,564-589,630-690`, `main_camera.gd:264-280` | operator only | n/a (already local) |
+| Upgrade terminal UI | `upgradeUI.gd`, `upgrade_terminal.gd` | operator (each player's own menu) | n/a; live refresh: see below |
+| Upgrade terminal world screen (SubViewport mirror) | `upgrade_terminal.gd:55-77` | shared | n/a (a one-time snapshot in the game too) |
+| Security keypad click / fail / GRANTED feedback | `security_keypad.gd:79-144` | shared | no (host only; only the entry replays) |
+| Keypad / loop button press animation | `keypad_button.gd:37`, `loop_button.gd:49` | shared | no (presser only) |
+| Card reader status label + accept sound | `card_reader.gd:48-93` | shared | no |
+| Loop puzzle buy / deny / best / solve sounds | `loop_puzzle.gd:407-561` | shared | no (host only) |
+| Loop run-void message | `loop_puzzle.gd:275-299` | operator | n/a (local) |
+| Erasable text scrub, clean bonus text | `erasable_text.gd`, `sponge.gd` | shared | n/a (replayed) |
+| Pickaxe upgraded / UV dispensed / crate n/10 / keycard notifications | `pickaxe.gd:206`, `ore_processor.gd:191`, `wodd_crate.gd:240`, `anomaly_workbench.gd:1613` | shared | no (host only) |
+| Crate break shake, bonus texts, maw death screen | `wodd_crate.gd:538`, `hud.gd`, `bottom_maw.gd:312` | shared / shared / operator | n/a (correct) |
+
+Found during the audit, not fixed in 0.2.2: a client holding LMB at a manual bench gets one item per
+press (the host clears the holder set when a craft completes; the client keeps its `_holding` key and
+never sends a new start), while the host player keeps crafting as in single player.
+
+### 0.2.2: an open upgrade menu did not follow other players' purchases
+
+**Root cause.** `upgradeUI.gd` rebuilds itself only after its own purchases (`update_ui` /
+`_refresh_*_row`), a milestone unlock or `show_menu`; it does not listen to `money_updated`, and
+`GameState.buy` writes the level without a signal. The host's menu never refreshed for a client's
+purchase (`session._host_buy` changed state silently). The client refreshed (every 250 ms) only when an
+item field changed, so money-only changes (earnings, a tool bought by someone else) left its credits and
+affordability stale. **Fix:** `upgrade_ui_ext.mp_request_refresh(structural)`, coalesced to one per frame
+and only while the menu is open: structural changes (mirrored items, unlocks, a client's purchase on the
+host) run the game's `update_ui` with the scroll position and the focused row kept; money-only changes
+run `update_credits` and the game's per-row refreshers in place. Triggers: client `econ` items / money /
+purchased_once, unlock replay, host `_host_buy` for a remote buyer, host econ money changes. The
+terminal's world-screen mirror stays a snapshot, as in the game.
+
+| M1 | Before | After |
+|---|---|---|
+| client's open menu, host buys SPRINT | row `LVL 0/3 \| $10` -> updated | updated |
+| client's open menu, host money +12 345 | credits `$4,999,990` unchanged | `$5,012,335` |
+| host's open menu, client buys SPRINT | row `LVL 1/3 \| $1000` unchanged | `LVL 2/3` |
+
+**Final runs (0.2.2):** headless 427 passed / 0 failed; `-Suite all` decomp: MP1 host 38/38,
+client 34/34, MP2 host 173/173, client 173/174; `-Suite all -SteamLanes 4`: MP1 38/38, 34/34, MP2
+173/173, 174/174. Real save folder unchanged (the first runs, while the real game was being played on
+this PC, flagged its own autosaves; the decomp instances always passed the T0 gate). Not run:
+`-HostLive` / `-ClientLive`.
+
+**Flaky, not caused by these fixes as far as the runs show.** B6 (100 ms +- 30, 5 % loss) fails now and
+then in full runs: moving p95 0.25 to 0.28 m against the 0.25 m limit in 4 of 7 full plain runs (0.07 to
+0.20 m in the others, 0.15 to 0.19 m when run alone or after W1/M1/G10), once the budget did not recover
+in 15 s, and with the 0.2.2 mod but the 0.2.1-era test files `b6_came_to_rest_70pct` failed (34 of 50
+asleep) while p95 was 0.18 m. G10 "f": in 1 of 7 full runs the host's copy dropped 6 of 24 ducks over the
+rim while lifting (limit 4; the client kept all), so the follower is still not perfectly even when the
+client hitches; the host player's own carry of the full crate (the game alone) dropped up to 6 of 16.
+Harness: on a headless client a held or equipped broom logs "Not supported by this display server" twice
+per frame, so T1 runs after B6.
 
 ## 0.2.1: the first two-PC Steam test (client could not interact, saw no new ducks)
 

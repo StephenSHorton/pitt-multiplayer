@@ -217,6 +217,14 @@ func _g5() -> void:
 
 func _g10_ducks_inside(tag: String, crate: Node3D, ducks: Array) -> void:
 	var out := Crate.outside(crate, ducks)
+	if tag in Crate.SPILL_OK:
+		report.value(tag + "_host_spilled", out.size())
+		return
+	if tag in Crate.SPILL_SOME:
+		report.value(tag + "_host_spilled", out.size())
+		report.check(tag + "_host_ducks_inside_but_top_spill", not ducks.is_empty() and out.size() <= Crate.FULL_SPILL_MAX,
+			"%d of %d outside (crate frame) %s" % [out.size(), ducks.size(), str(out)])
+		return
 	report.check(tag + "_host_ducks_inside", not ducks.is_empty() and out.is_empty(), "outside (crate frame) %s" % str(out))
 
 
@@ -247,22 +255,39 @@ func _g10() -> void:
 	var home := Transform3D(Basis(Vector3.UP, yaw + PI / 2.0), at)
 	crate.global_transform = home
 	await sleep_ms(1200)
-	for phase in ["e", "d"]:
+	for phase in ["e", "d", "f"]:
 		var tag: String = "g10" + phase
 		var ducks: Array = []
-		if phase == "d":
+		if phase != "e":
 			crate.global_transform = home
 			crate.linear_velocity = Vector3.ZERO
 			crate.angular_velocity = Vector3.ZERO
 			await sleep_ms(800)
-			for off in Crate.DUCK_OFFSETS:
-				var dp: Vector3 = crate.global_transform * off
-				var dr = await cmd("entity.spawn", {"pool_id": "duck", "position": [dp.x, dp.y, dp.z]})
-				var dn = _node(int(dr.value.get("entity_id", 0))) if dr.ok and typeof(dr.value) == TYPE_DICTIONARY else null
-				if dn != null:
-					ducks.append(dn)
+			var layers: Array = [Crate.DUCK_OFFSETS]
+			if phase == "f":
+				layers = []
+				for y in Crate.FULL_LAYERS:
+					var layer: Array = []
+					for x in Crate.FULL_X:
+						for z in Crate.FULL_Z:
+							layer.append(Vector3(x, y, z))
+					layers.append(layer)
+			for layer in layers:
+				for off in layer:
+					var dp: Vector3 = crate.global_transform * off
+					var dr = await cmd("entity.spawn", {"pool_id": "duck", "position": [dp.x, dp.y, dp.z]})
+					var dn = _node(int(dr.value.get("entity_id", 0))) if dr.ok and typeof(dr.value) == TYPE_DICTIONARY else null
+					if dn != null:
+						ducks.append(dn)
+				await sleep_ms(400)
 			await sleep_ms(1500)
-			_g10_ducks_inside("g10d_before", crate, ducks)
+			if phase == "f":
+				# the ones that bounced out stay out of the checks; the crate must still be full
+				var spilled := Crate.outside(crate, ducks)
+				report.value("g10f_spilled", spilled.size())
+				ducks = ducks.filter(func(dn): return is_instance_valid(dn) and Crate.inside(crate, (dn as Node3D).global_position))
+				report.check("g10f_crate_full", ducks.size() >= Crate.FULL_MIN, "%d ducks inside" % ducks.size())
+			_g10_ducks_inside(tag + "_before", crate, ducks)
 		var y0 := crate.global_position.y
 		var deids: Array = []
 		for dn in ducks:
@@ -280,67 +305,79 @@ func _g10() -> void:
 			report.check(tag + "_host_copy_follows_15cm", d <= 0.15, "%.3f m" % d)
 			report.check(tag + "_host_copy_lifted", crate.global_position.y - y0 >= Crate.LIFT_M, "dy %.3f m" % (
 				crate.global_position.y - y0))
-			if phase == "d":
+			if phase != "e":
 				_g10_ducks_inside(tag + "_held", crate, ducks)
 		report.mark(tag + "_follow_checked")
 		var mv: Dictionary = await wait_peer_mark(tag + "_moved", 20.0)
-		if not mv.is_empty() and phase == "d":
+		if not mv.is_empty() and phase != "e":
 			await sleep_ms(300)
 			_g10_ducks_inside(tag + "_moved", crate, ducks)
-			await shot("mp2-g10-host-sees-client-carry-ducks")
+			await shot("mp2-g10%s-host-sees-client-carry-ducks" % phase)
 		var rel: Dictionary = await wait_peer_mark(tag + "_released", 20.0)
 		report.check(tag + "_client_released", not rel.is_empty(), "")
 		var ok: bool = await wait_for(func(): return grab().owner_of(eid) == 1 and grab().hold_kind(eid) == "", 3.0)
 		report.check(tag + "_back_to_host", ok, "owner %d kind %s" % [grab().owner_of(eid), grab().hold_kind(eid)])
 		report.check(tag + "_host_body_dynamic", not crate.freeze, "")
-		await sleep_ms(2500)
-		if phase == "d":
+		await sleep_ms(1500)
+		# the rest poses are compared with the client's: wait until everything sleeps
+		var bodies_all: Array = ducks.duplicate()
+		bodies_all.append(crate)
+		await wait_for(func(): return bodies_all.all(func(x): return not is_instance_valid(x) or (x as RigidBody3D).sleeping), 6.0)
+		if phase != "e":
 			_g10_ducks_inside(tag + "_rest", crate, ducks)
 		var rest := {"crate": Crate.arr(crate.global_position)}
 		for dn in ducks:
 			rest[str(int(api.entities.id_of(dn)))] = Crate.arr(dn.global_position)
 		report.mark(tag + "_rest", {"g10_rest": rest})
 		await wait_peer_mark(tag + "_checked", 20.0)
-		if phase == "d":
-			await _g10_host_control(crate, ducks, fwd)
-		for dn in ducks:
-			if is_instance_valid(dn) and dn.visible:
+		if phase != "e":
+			# control: the host player carries the same crate (the game's own carry)
+			var inside_now := ducks.filter(func(dn): return is_instance_valid(dn) and Crate.inside(crate, (dn as Node3D).global_position))
+			# spilled ones lie around the crate (and in the host's interact ray): out of the way
+			for dn in ducks:
+				if is_instance_valid(dn) and not (dn in inside_now) and dn.visible:
+					g("ObjectPoolManager").recycle(dn)
+			await sleep_ms(300)
+			await _g10_host_control(crate, inside_now, fwd, "g10h" if phase == "d" else "g10hf")
+		for dn in tree().get_nodes_in_group("product"):
+			if dn is RigidBody3D and dn.visible and (dn as Node3D).global_position.distance_to(crate.global_position) < 4.0:
 				g("ObjectPoolManager").recycle(dn)
+		await sleep_ms(500)
 	if is_instance_valid(crate) and crate.visible:
 		g("ObjectPoolManager").recycle(crate)
 	report.mark("g10_end")
 
 
 ## Control: the host player grabs the same crate (ducks inside) through the same input path.
-func _g10_host_control(crate: RigidBody3D, ducks: Array, fwd: Vector3) -> void:
+func _g10_host_control(crate: RigidBody3D, ducks: Array, fwd: Vector3, h: String) -> void:
 	var eid := int(bodies().eid_of(crate))
 	var p0 := player().global_position
 	var spot := open_spot(Vector3(crate.global_position.x, p0.y, crate.global_position.z), fwd, [1.9, 2.2, 1.6])
-	if not report.check("g10h_found_spot", spot != Vector3.INF, ""):
-		report.mark("g10h_holding", {})
-		report.mark("g10h_released")
+	if not report.check(h + "_found_spot", spot != Vector3.INF, ""):
+		report.mark(h + "_holding", {})
+		report.mark(h + "_released")
 		return
 	await cmd("player.teleport", {"position": [spot.x, spot.y, spot.z]})
 	await sleep_ms(600)
 	var cam = tree().get_first_node_in_group("main_camera")
 	var y0 := crate.global_position.y
-	var picked: bool = await Crate.grab_by_input(self, crate, "g10h")
-	report.check("g10h_host_picked", picked, "")
+	var picked: bool = await Crate.grab_by_input(self, crate, h)
+	report.check(h + "_host_picked", picked, "")
 	await Crate.lift(self)
 	await sleep_ms(1200)
-	report.check("g10h_host_still_holding", cam.picked_object == crate, "")
-	report.check("g10h_host_lifted", crate.global_position.y - y0 >= Crate.LIFT_M, "dy %.3f m" % (crate.global_position.y - y0))
-	report.check("g10h_owner_host_held", grab().owner_of(eid) == 1 and grab().hold_kind(eid) == "held", "")
-	_g10_ducks_inside("g10h_held", crate, ducks)
-	report.mark("g10h_holding", {"g10_pos": Crate.arr(crate.global_position)})
-	await wait_peer_mark("g10h_checked", 20.0)
+	report.check(h + "_host_still_holding", cam.picked_object == crate, "")
+	report.check(h + "_host_lifted", crate.global_position.y - y0 >= Crate.LIFT_M, "dy %.3f m" % (crate.global_position.y - y0))
+	report.check(h + "_owner_host_held", grab().owner_of(eid) == 1 and grab().hold_kind(eid) == "held", "")
+	_g10_ducks_inside(h + "_held", crate, ducks)
+	report.mark(h + "_holding", {"g10_pos": Crate.arr(crate.global_position)})
+	await wait_peer_mark(h + "_checked", 20.0)
 	if cam.picked_object == crate:
 		await Crate.lift(self, -1.0)
 		await sleep_ms(500)
 		await Crate.press_lmb(self)
 		await sleep_ms(300)
-	report.check("g10h_host_dropped", cam.picked_object == null, "")
-	report.mark("g10h_released")
+	report.check(h + "_host_dropped", cam.picked_object == null, "")
+	report.mark(h + "_released")
 	await sleep_ms(1500)
 	await cmd("player.teleport", {"position": [p0.x, p0.y, p0.z]})
 	await sleep_ms(400)

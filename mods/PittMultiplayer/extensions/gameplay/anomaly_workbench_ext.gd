@@ -23,9 +23,9 @@ func start_crafting() -> void:
 
 
 func stop_crafting() -> void:
-	if G.bench_stop(self):
-		return
-	if not G.bench_release(self):
+	if G.bench_stop(self) or not G.bench_release(self):
+		if not G.bench_operated_here(self):
+			show_progress_bar(false)
 		return
 	await super()
 
@@ -134,3 +134,14 @@ func _mp_clear_ritual() -> void:
 		if is_instance_valid(b) and b.has_meta("pitt_mp_ritual"):
 			b.remove_meta("pitt_mp_ritual")
 	_mp_ritual.clear()
+
+
+## 0.2.2: the HUD progress bar is the operator's only (MP2 4.4, mp_gate.bench_bar_show).
+func show_progress_bar(visible_: bool) -> void:
+	if G.bench_bar_show(self, visible_):
+		super(visible_)
+
+
+func update_progress_bar(value: float) -> void:
+	if G.bench_bar_value(self):
+		super(value)

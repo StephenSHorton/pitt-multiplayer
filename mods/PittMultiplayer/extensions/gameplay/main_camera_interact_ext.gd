@@ -28,6 +28,13 @@ func _handle_dpad_context(delta: float) -> void:
 	G.end_input_scope()
 
 
+## A bench ejecting for another player does not shake this camera (mp_gate.shake_mute).
+func apply_screenshake(intensity: float, duration: float):
+	if G.shake_mute:
+		return
+	super(intensity, duration)
+
+
 func _do_interact() -> bool:
 	G.begin_input_scope()
 	var r: bool = super()

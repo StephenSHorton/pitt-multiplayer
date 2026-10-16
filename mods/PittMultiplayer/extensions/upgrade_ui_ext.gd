@@ -85,8 +85,7 @@ func _mp_purchase_feedback(row: Object, kind: String, ok: bool, code: String, ar
 		_pulse_node(pulse_target, COLOR_DIM, 0.3)
 	if is_upgrade:
 		_screen_shake(1.5, 0.08)
-		update_ui()
-		update_credits()
+		mp_request_refresh(true)
 	else:
 		_screen_shake(2.0, 0.1)
 	if btn:
@@ -136,3 +135,91 @@ func _unit_owned_elsewhere(unit: Node) -> bool:
 	if G.remote_owned(unit):
 		return true
 	return super(unit)
+
+
+# ------------------------------------------------------------------ live refresh (0.2.2)
+# Another player's purchase, an unlock or a money change reaches this peer as
+# replicated state; the game refreshes its open menu only after its own purchases.
+# Requests are coalesced to one per frame; nothing happens while the menu is closed
+# (show_menu rebuilds it). Structural (levels, prices, unlocks, items): the game's
+# update_ui with the viewer's scroll and focused row kept. Money only: the credits
+# label and the game's per-row refreshers, in place (no rebuild, no flicker). The
+# terminal's world-screen mirror (meta is_mirror) is a snapshot in the game too.
+
+var _mp_refresh := 0           # 0 none, 1 money, 2 structural (pending this frame)
+
+
+func mp_request_refresh(structural: bool) -> void:
+	if has_meta("is_mirror") or not is_inside_tree():
+		return
+	var want := 2 if structural else 1
+	if _mp_refresh >= want:
+		return
+	var was := _mp_refresh
+	_mp_refresh = want
+	if was == 0:
+		get_tree().process_frame.connect(_mp_do_refresh, CONNECT_ONE_SHOT)
+
+
+func _mp_do_refresh() -> void:
+	var kind := _mp_refresh
+	_mp_refresh = 0
+	if not visible or not is_inside_tree():
+		return
+	if kind == 1:
+		update_credits()
+		for row in _mp_live_rows():
+			var btn = _mp_row_part(row, "button")
+			if btn is Button:
+				(btn as Button).add_theme_color_override("font_color", COLOR_GREEN)
+			var refresher := _mp_row_refresher(row)
+			if refresher != "":
+				call(refresher, row)
+		return
+	var scrolls := {}
+	for sc in find_children("*", "ScrollContainer", true, false):
+		scrolls[sc] = (sc as ScrollContainer).scroll_vertical
+	var focus_id := _mp_row_id(get_viewport().gui_get_focus_owner())
+	update_ui()
+	update_credits()
+	await get_tree().process_frame
+	for sc in scrolls:
+		if is_instance_valid(sc):
+			(sc as ScrollContainer).scroll_vertical = int(scrolls[sc])
+	if focus_id != "":
+		for row in _mp_live_rows():
+			if _mp_row_id(_mp_row_part(row, "button")) == focus_id:
+				var b = _mp_row_part(row, "button")
+				if b is Control and (b as Control).is_visible_in_tree():
+					(b as Control).grab_focus()
+				break
+
+
+## The game's in-place refresher for a row kind ("" = none).
+static func _mp_row_refresher(row: Node) -> String:
+	for kind in [["tool_name", "_refresh_tool_buy_row"], ["toy_name", "_refresh_toy_buy_row"],
+			["category", "_refresh_upgrade_row"]]:
+		if row.has_meta(kind[0]) and row.has_meta("label"):
+			return String(kind[1])
+	return ""
+
+
+func _mp_live_rows() -> Array:
+	var out: Array = []
+	for r in find_children("*", "HBoxContainer", true, false):
+		if r.has_meta("button") and not r.is_queued_for_deletion():
+			out.append(r)
+	return out
+
+
+## The row identity of a focused button ("" if it is not a row button).
+func _mp_row_id(c) -> String:
+	if c == null or not is_instance_valid(c) or not (c is Node):
+		return ""
+	var row = (c as Node).get_parent()
+	if row == null or not row.has_meta("button") or row.get_meta("button") != c:
+		return ""
+	for k in ["tool_name", "toy_name"]:
+		if row.has_meta(k):
+			return "%s:%s:%s" % [k, str(row.get_meta(k)), str(row.get_meta("level", ""))]
+	return "item:%s:%s:%s" % [str(row.get_meta("category", "")), str(row.get_meta("key", "")), str(row.get_meta("subkey", ""))]
