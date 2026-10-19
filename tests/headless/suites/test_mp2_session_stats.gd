@@ -33,7 +33,7 @@ func test_host_rtt_stats_line_and_dump() -> void:
 	assert_true(line.begins_with("mp stats: host in_game/"), "original prefix kept: %s" % line)
 	assert_true(line.contains(" | avatars "), "original fields kept")
 	assert_true(line.contains("| peer %d rtt %d" % [cp, h.session.peer_rtt_ms(cp)]), "per-peer RTT appended: %s" % line)
-	assert_true(line.contains("budget_bps "), "the replicator's budget row is consumed: %s" % line)
+	assert_true(line.contains("eff_bps "), "the replicator's budget row is consumed: %s" % line)
 	assert_true(line.contains("| host ") and line.contains("overload "), "host replicator totals: %s" % line)
 	var cl: String = c.session.stats_line()
 	assert_true(cl.begins_with("mp stats: client"), "client line")
@@ -62,7 +62,7 @@ func test_left_peer_snapshot() -> void:
 		var snap: Dictionary = left[cp]
 		assert_eq(String(snap.why), "left", "reason")
 		assert_true(int(snap.rtt_ms) >= 0, "its RTT")
-		assert_true(snap.budget.has("budget_bps"), "its budget row from before on_peer_left: %s" % str(snap.budget))
+		assert_true(snap.budget.has("eff_bps"), "its budget row from before on_peer_left: %s" % str(snap.budget))
 		assert_true(snap.meter.size() > 0 and snap.meter.any(func(w): return int(w.tx) > 0), "its last seconds of traffic")
 	assert_eq(h.session.peer_rtt_ms(cp), -1, "live RTT forgotten")
 	assert_true(h.session.log_lines.any(func(l): return String(l).contains("peer %d leaving" % cp)), "logged once")

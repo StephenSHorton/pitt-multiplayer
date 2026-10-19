@@ -274,13 +274,14 @@ tick when over (`sel_overrun`). Motion values are computed once per tick and sha
 
 **Budget (`budget.gd`).** `budget_bps(c)` starts at the `physics_detail` value (24 / 48 / 96 KB/s) and adapts
 from `netq` and the client's ping RTT. The RTT minimum is the minimum of the last 30 s of reports (a
-slower route becomes the new baseline). Congestion for 2 s → ×0.7 every 2 s: loss > 15 %, or loss > 5 %
+slower route becomes the new baseline; a report with loss > 5 % only counts when it lowers the minimum, so a
+lasting bottleneck never does). Congestion for 2 s → ×0.7 every 2 s: loss > 15 %, or loss > 5 %
 while the RTT rose 20 ms over the minimum, may cut to the 12 KB/s floor; RTT alone (> 2× the minimum and
 > minimum + 50 ms) cuts at most to half the configured value, and is ignored while the host is overloaded.
 Clean for 5 s → +15 % of the configured value per second up to it. Probe-up: quiet (no queueing, loss ≤ 5 %)
 for 10 s at the configured value → +5 % of it per second up to a ceiling of 3× configured (at most
 400 KB/s, the host-wide upload cap); any queueing or loss above the configured value drops straight back
-to it and holds the probe off for 30 s. The Steam transport sets SteamNetworkingSockets' global
+to it and holds the probe off for 30 s; without a report in the last 2.5 s the probe does not step. The Steam transport sets SteamNetworkingSockets' global
 SendRateMin/Max to 512 KB/s so Steam's own pacing never sits below the ceiling. Avatars (about 1 KB/s per
 player), econ and control are outside this budget.
 

@@ -3,9 +3,9 @@ extends RefCounted
 ## Starts at the physics_detail value (`configured`) and moves between a floor and
 ## a probe ceiling from the client's netq reports (loss, RTT; about 1 s apart).
 ##
-## Signals (min_rtt is the minimum RTT of the last MIN_WINDOW_MS of reports, so a
-## route change or a steadily slower relay becomes the new baseline instead of
-## reading as congestion for the rest of the session):
+## Signals (min_rtt is the minimum RTT of the last MIN_WINDOW_MS of low-loss
+## reports, so a route change or a steadily slower relay becomes the new baseline
+## instead of reading as congestion for the rest of the session):
 ##   - loss evidence: loss > 15 %, or loss > 5 % while the RTT rose 20 ms over the
 ##     minimum (queueing). Random loss on an idle link is not cured by sending
 ##     less, so 5-15 % loss at a steady RTT alone does not cut.
@@ -19,7 +19,8 @@ extends RefCounted
 ## queueing, loss <= 5 %) for PROBE_HOLD_MS, +5 % of configured per second up to
 ## `ceiling`; any queueing or loss signal above configured drops straight back to
 ## configured (no cut below it) and holds the probe off for PROBE_BACKOFF_MS, so a
-## probe that builds a queue never becomes the window's new RTT baseline.
+## probe that builds a queue never becomes the window's new RTT baseline. A probe
+## step also needs a report from the last REPORT_FRESH_MS (no feedback, no probe).
 ## The host-wide overload guard halves the bytes of every budget, except when one
 ## peer is in game (bytes_for n_peers == 1: halving the only client's bytes saves
 ## no host CPU, it only starves that client).
@@ -46,6 +47,8 @@ const PROBE_HOLD_MS := 10000
 const PROBE_STEP_MS := 1000
 const PROBE_UP := 0.05
 const PROBE_BACKOFF_MS := 30000
+## a probe step needs a netq report at most this old (reports come about 1 s apart)
+const REPORT_FRESH_MS := 2500
 
 var configured := 48000
 var bps := 48000
@@ -67,6 +70,7 @@ var _probe_from := -1            # when bps last reached (or fell back to) confi
 var _probe_block_until := -1
 var _last_up_ms := 0
 var _last_down_ms := 0
+var _last_report_ms := -REPORT_FRESH_MS - 1
 
 
 func _init(detail: String = "normal") -> void:
@@ -93,7 +97,8 @@ func rtt_floor() -> int:
 func report(now_ms: int, loss: float, rtt_ms: int, overload: float = 1.0) -> void:
 	last_loss = loss
 	last_rtt = rtt_ms
-	_window_rtt(now_ms, rtt_ms)
+	_last_report_ms = now_ms
+	_window_rtt(now_ms, rtt_ms, loss)
 	# RTT: over 2x the windowed minimum AND at least RTT_SLACK_MS above it (a 1 ms LAN
 	# minimum must not turn every 25 ms frame-paced ping into "congested")
 	var rtt_bad := rtt_ms > 0 and min_rtt > 0 and rtt_ms > 2 * maxi(min_rtt, 10) and rtt_ms > min_rtt + RTT_SLACK_MS
@@ -130,9 +135,13 @@ func report(now_ms: int, loss: float, rtt_ms: int, overload: float = 1.0) -> voi
 	_step_up(now_ms)
 
 
-## min_rtt = the minimum of the reports of the last MIN_WINDOW_MS.
-func _window_rtt(now_ms: int, rtt_ms: int) -> void:
-	if rtt_ms > 0:
+## min_rtt = the minimum of the reports of the last MIN_WINDOW_MS. A report with
+## loss over BAD_LOSS only enters the window when it lowers the minimum (or is
+## the first): otherwise a lasting bottleneck (queue + loss) would become the
+## new baseline after one window and the loss cut would let go while it lasts.
+## Without new samples the last minimum stays (persistent mild loss keeps it).
+func _window_rtt(now_ms: int, rtt_ms: int, loss: float) -> void:
+	if rtt_ms > 0 and (loss <= BAD_LOSS or min_rtt < 0 or rtt_ms <= min_rtt):
 		_rtts.append([now_ms, rtt_ms])
 	while not _rtts.is_empty() and now_ms - int(_rtts[0][0]) > MIN_WINDOW_MS:
 		_rtts.pop_front()
@@ -159,7 +168,8 @@ func _step_up(now_ms: int) -> void:
 		if bps >= configured:
 			_probe_from = now_ms
 		return
-	if bps >= ceiling or _quiet_since < 0 or now_ms < _probe_block_until:
+	# the probe needs fresh link feedback: no reports (stall, hitch, loading) -> no step
+	if bps >= ceiling or _quiet_since < 0 or now_ms < _probe_block_until or now_ms - _last_report_ms > REPORT_FRESH_MS:
 		return
 	if now_ms - maxi(_quiet_since, _probe_from) < PROBE_HOLD_MS or now_ms - _last_up_ms < PROBE_STEP_MS:
 		return

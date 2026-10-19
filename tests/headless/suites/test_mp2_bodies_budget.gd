@@ -77,8 +77,10 @@ func test_real_loss_still_cuts() -> void:
 	assert_eq(b.bps, Budget.FLOOR_BPS, "20 % loss cuts to the 12 KB/s floor")
 	var q := Budget.new("normal")
 	_feed(q, 0, 5000, 0.0, 50)
-	_feed(q, 5000, 30000, 0.10, 90)
+	var rq := _feed(q, 5000, 90000, 0.10, 90)
 	assert_eq(q.bps, Budget.FLOOR_BPS, "10 % loss while queueing (RTT +40 ms) also reaches the floor")
+	assert_eq(q.min_rtt, 50, "lossy reports do not become the RTT baseline, so the cut holds past one window")
+	assert_true(int(rq[1]) <= 48000, "no recovery while the bottleneck lasts")
 	var rnd := Budget.new("normal")
 	var r := _feed(rnd, 0, 60000, 0.10, 50)
 	assert_eq(int(r[0]), 48000, "10 % loss at a steady RTT: no cut")
@@ -111,6 +113,21 @@ func test_probe_up_capped_and_backs_off() -> void:
 	for k in ["bps", "configured", "ceiling", "downs", "ups", "min_rtt"]:
 		assert_true(info.has(k), "info() has %s" % k)
 	assert_eq(b.get_ceiling(), b.ceiling, "getter")
+
+
+func test_no_probe_without_reports() -> void:
+	var b := Budget.new("normal")
+	_feed(b, 0, 15000, 0.0, 50)
+	var at: int = b.bps
+	assert_true(at > b.configured, "probing while reports arrive (%d)" % at)
+	# reports stop (relay stall, client hitch, loading): only the sender tick runs
+	for t in range(15000, 75000, 33):
+		b.tick(t)
+	assert_true(b.bps <= at + roundi(b.configured * Budget.PROBE_UP) * 2,
+		"no probe climb without link feedback (%d -> %d)" % [at, b.bps])
+	b.report(75000, 0.0, 50)
+	b.tick(76000)
+	assert_true(b.bps > at, "probing resumes with fresh reports")
 
 
 func test_single_peer_overload_keeps_bytes() -> void:
