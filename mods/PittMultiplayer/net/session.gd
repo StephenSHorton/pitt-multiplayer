@@ -619,10 +619,10 @@ func _on_lobby_entered(info: Dictionary) -> void:
 		_set_state("lobby")
 
 
-## Once per session: the Steam send-rate clamp this process applied (none: Steam's own).
+## Once per session: the Steam send-rate clamp in effect (none logged: Steam's own).
 func _log_send_rate() -> void:
 	if transport != null and "send_rate_bps" in transport and int(transport.send_rate_bps) > 0:
-		_log("info", "steam send rate set to %d B/s (min = max)" % int(transport.send_rate_bps))
+		_log("info", "steam send rate %d B/s (min = max)" % int(transport.send_rate_bps))
 
 
 func _on_lobby_left(reason: String) -> void:

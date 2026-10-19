@@ -49,7 +49,7 @@ var mode := "socket"
 ## the host's physics_detail ("" on a client: its uplink carries little, Steam's rate stays)
 var physics_detail := ""
 var _relay_inited := false
-## the rate this transport set on the Steam singleton (0: left alone)
+## the send-rate clamp in effect when this transport opened (0: Steam's own)
 var send_rate_bps := 0
 ## process-wide: the rate currently set through the global config (0: never touched)
 static var _applied_rate := 0
@@ -82,7 +82,8 @@ func _init_relay() -> void:
 	if want > 0 and want != _applied_rate and apply_send_rate(steam, steam_const("NETWORKING_CONFIG_SEND_RATE_MIN"),
 			steam_const("NETWORKING_CONFIG_SEND_RATE_MAX"), want):
 		_applied_rate = want
-		send_rate_bps = want
+	# also when an earlier session in this process set it (still in force, logged again)
+	send_rate_bps = _applied_rate
 	stats["send_rate"] = send_rate_bps
 
 
