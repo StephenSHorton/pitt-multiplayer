@@ -28,17 +28,31 @@ extends "transport.gd"
 ## DLL's method binds and constant names). The global value is set before
 ## create_host / create_client, so every connection made after it inherits it.
 ## Min and max get the same value (the Steamworks header advises setting both
-## to configure a send rate); budget.gd stays the congestion brake.
+## to configure a send rate; we found no header in reach to confirm whether
+## this build estimates bandwidth between them). Because a fixed rate also
+## paces the reliable bursts outside the body budget (world-snapshot chunks),
+## it is raised only as far as the host's physics_detail needs: the probe
+## ceiling plus SEND_RATE_HEADROOM_BPS, and only when that is above the about
+## 256 KB/s the Steamworks documentation gives as the default (in practice
+## only "high", ceiling 288 KB/s). Below that Steam's own setting stays. The
+## value is process-wide, so a later session with a lower need puts it back to
+## STEAM_DEFAULT_SEND_RATE_BPS. budget.gd stays the congestion brake.
 
 const VIRTUAL_PORT := 0
-## per-connection send-rate clamp: above the body probe cap (400 KB/s) plus
-## avatars, control and the world stream
-const SEND_RATE_BPS := 512000
+## avatars, control, econ and the world stream on top of the body probe ceiling
+const SEND_RATE_HEADROOM_BPS := 64000
+## the send rate the Steamworks documentation gives as SteamNetworkingSockets' default
+const STEAM_DEFAULT_SEND_RATE_BPS := 262144
+const Budget = preload("../world/bodies/budget.gd")
 
 var mode := "socket"
+## the host's physics_detail ("" on a client: its uplink carries little, Steam's rate stays)
+var physics_detail := ""
 var _relay_inited := false
-## 0 until the send rate was set on the Steam singleton
+## the rate this transport set on the Steam singleton (0: left alone)
 var send_rate_bps := 0
+## process-wide: the rate currently set through the global config (0: never touched)
+static var _applied_rate := 0
 
 
 func kind() -> String:
@@ -64,10 +78,24 @@ func _init_relay() -> void:
 	var steam = Engine.get_singleton("Steam")
 	if steam != null and steam.has_method("initRelayNetworkAccess"):
 		steam.initRelayNetworkAccess()
-	if apply_send_rate(steam, steam_const("NETWORKING_CONFIG_SEND_RATE_MIN"),
-			steam_const("NETWORKING_CONFIG_SEND_RATE_MAX"), SEND_RATE_BPS):
-		send_rate_bps = SEND_RATE_BPS
+	var want := send_rate_target(physics_detail, _applied_rate)
+	if want > 0 and want != _applied_rate and apply_send_rate(steam, steam_const("NETWORKING_CONFIG_SEND_RATE_MIN"),
+			steam_const("NETWORKING_CONFIG_SEND_RATE_MAX"), want):
+		_applied_rate = want
+		send_rate_bps = want
 	stats["send_rate"] = send_rate_bps
+
+
+## The rate to set for `detail` ("" = no need): the probe ceiling plus the
+## headroom when that is above Steam's default; else 0 (leave Steam alone), or
+## the default when an earlier session in this process raised it (`applied`).
+static func send_rate_target(detail: String, applied: int) -> int:
+	var need := 0
+	if detail != "":
+		need = Budget.ceiling_for(Budget.detail_bps(detail)) + SEND_RATE_HEADROOM_BPS
+	if need > STEAM_DEFAULT_SEND_RATE_BPS:
+		return need
+	return STEAM_DEFAULT_SEND_RATE_BPS if applied > 0 else 0
 
 
 ## A Steam class constant through ClassDB (-1 when GodotSteam is absent), so this

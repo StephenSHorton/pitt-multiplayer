@@ -275,20 +275,28 @@ tick when over (`sel_overrun`). Motion values are computed once per tick and sha
 **Budget (`budget.gd`).** `budget_bps(c)` starts at the `physics_detail` value (24 / 48 / 96 KB/s) and adapts
 from `netq` and the client's ping RTT. The RTT minimum is the minimum of the last 30 s of reports (a
 slower route becomes the new baseline; a report with loss > 5 % only counts when it lowers the minimum, so a
-lasting bottleneck never does). Congestion for 2 s → ×0.7 every 2 s: loss > 15 %, or loss > 5 %
+bottleneck does not become it while the cut works on it; after a whole 30 s window of nothing but lossy
+reports their lowest RTT is the minimum, so lasting 5-15 % loss on a slower route cannot pin the floor for
+good). Congestion for 2 s → ×0.7 every 2 s: loss > 15 %, or loss > 5 %
 while the RTT rose 20 ms over the minimum, may cut to the 12 KB/s floor; RTT alone (> 2× the minimum and
-> minimum + 50 ms) cuts at most to half the configured value, and is ignored while the host is overloaded.
+> minimum + 50 ms) cuts at most to half the configured value, never below 18 KB/s (so on `low` too it stays
+above the loss floor). `report()` also ignores RTT alone while the host is overloaded, once
+`replicator_host.gd` passes its overload factor (pending: the host stream's call-site change).
 Clean for 5 s → +15 % of the configured value per second up to it. Probe-up: quiet (no queueing, loss ≤ 5 %)
 for 10 s at the configured value → +5 % of it per second up to a ceiling of 3× configured (at most
 400 KB/s, the host-wide upload cap); any queueing or loss above the configured value drops straight back
-to it and holds the probe off for 30 s; without a report in the last 2.5 s the probe does not step. The Steam transport sets SteamNetworkingSockets' global
-SendRateMin/Max to 512 KB/s so Steam's own pacing never sits below the ceiling. Avatars (about 1 KB/s per
-player), econ and control are outside this budget.
+to it and holds the probe off for 30 s; without a report in the last 2.5 s the probe does not step. On the
+host the Steam transport sets SteamNetworkingSockets' global SendRateMin/Max (same value) to the probe
+ceiling + 64 KB/s only when that is above Steam's documented default of about 256 KB/s (in practice
+`high`: 352 KB/s), so Steam's pacing never sits below the ceiling and reliable bursts outside the budget are
+not paced faster than needed; it logs the value it set. Avatars (about 1 KB/s per player), econ and control
+are outside this budget.
 
 **Physics overload guard.** If `Performance.TIME_PHYSICS_PROCESS` exceeds 80 % of the 16.7 ms tick for 5 s,
 the host halves every budget (fewer, staler updates; never a tick change, D23) and shows the host
-`MP_PHYSICS_OVERLOADED` at most once a minute. With one in-game peer the halving does not apply to bytes
-(`Budget.bytes_for(..., n_peers = 1)`): it would only starve the only client.
+`MP_PHYSICS_OVERLOADED` at most once a minute. With one in-game peer the halving is not to apply to bytes
+(`Budget.bytes_for(..., n_peers = 1)`): it would only starve the only client. Pending: this takes effect once
+`replicator_host.gd` passes the in-game peer count to `bytes_for` (host stream).
 
 ### 3.4 Client replicator (`world/bodies/replicator_client.gd`, `world/bodies/puppet_body.gd`)
 
@@ -895,7 +903,7 @@ moving faster than 0.5 m/s, `now − last_update` p95 ≤ 150 ms at normal detai
 | Same-frame recycle + respawn of one node | L8 reuse detection → new eid; else the host's `SNAP` heuristic | `test_entities` reuse case |
 | Fixture key resolves on one side only | logged, ignored | `fixture_mismatch` |
 | Host overloaded (thousands of awake bodies) | 2 ms selection cap, budget halving, toast; the tick never changes | `sel_overrun` |
-| Client bandwidth drop / loss | adaptive budget (×0.7 / +15 %/s, probe to 3× while clean), floor 12 KB/s on loss, half the configured value on RTT alone | `budget_bps`, per-peer `rtt` in `mp stats` |
+| Client bandwidth drop / loss | adaptive budget (×0.7 / +15 %/s, probe to 3× while clean), floor 12 KB/s on loss, half the configured value (at least 18 KB/s) on RTT alone | `budget_bps`, per-peer `rtt` in `mp stats` |
 | Owner silent / gone / paused | revoke after 1.5 s, on disconnect, via the pause guard release | G-scenarios |
 | Grab race (two peers, or host and client) | host first-come on ordered ch3; host player through the same table | G2 |
 | Held body desync or cheating | distance check vs the owner's avatar, epoch check, rate limit | `held_rejected` |

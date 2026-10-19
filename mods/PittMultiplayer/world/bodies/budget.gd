@@ -5,15 +5,18 @@ extends RefCounted
 ##
 ## Signals (min_rtt is the minimum RTT of the last MIN_WINDOW_MS of low-loss
 ## reports, so a route change or a steadily slower relay becomes the new baseline
-## instead of reading as congestion for the rest of the session):
+## instead of reading as congestion for the rest of the session; when every
+## report of a whole window was lossy, the lowest of those becomes it, see
+## _window_rtt):
 ##   - loss evidence: loss > 15 %, or loss > 5 % while the RTT rose 20 ms over the
 ##     minimum (queueing). Random loss on an idle link is not cured by sending
 ##     less, so 5-15 % loss at a steady RTT alone does not cut.
 ##   - RTT alone: over 2x the minimum AND RTT_SLACK_MS above it. Ignored while the
 ##     host is overloaded (its own frame stalls inflate the frame-paced ping).
 ## Congestion for 2 s -> x0.7 every 2 s. Loss evidence may cut to FLOOR_BPS
-## (12 KB/s); RTT alone stops at RTT_FLOOR_SHARE x configured (the 2026-10-18
-## session sat at 12 KB/s for about 80 minutes on RTT alone).
+## (12 KB/s); RTT alone stops at rtt_floor(): RTT_FLOOR_SHARE x configured, at
+## least RTT_FLOOR_MIN_BPS (the 2026-10-18 session sat at 12 KB/s for about 80
+## minutes on RTT alone).
 ## Clean for 5 s -> +15 % of the configured value per second up to it (floor to
 ## normal in about 10 s). Probe-up: once at the configured value and quiet (no
 ## queueing, loss <= 5 %) for PROBE_HOLD_MS, +5 % of configured per second up to
@@ -23,7 +26,8 @@ extends RefCounted
 ## step also needs a report from the last REPORT_FRESH_MS (no feedback, no probe).
 ## The host-wide overload guard halves the bytes of every budget, except when one
 ## peer is in game (bytes_for n_peers == 1: halving the only client's bytes saves
-## no host CPU, it only starves that client).
+## no host CPU, it only starves that client). Both that and report()'s overload
+## argument take effect only where the caller passes them (default: as before).
 
 const DETAIL := {"low": 24000, "normal": 48000, "high": 96000}
 const FLOOR_BPS := 12000
@@ -37,8 +41,10 @@ const UP := 0.15
 const RTT_SLACK_MS := 50
 ## min_rtt is the minimum over this much report history (about 30 reports)
 const MIN_WINDOW_MS := 30000
-## RTT-only congestion never cuts below this share of the configured value
+## RTT-only congestion never cuts below this share of the configured value, nor
+## below RTT_FLOOR_MIN_BPS (on "low", half of 24 KB/s would be FLOOR_BPS itself)
 const RTT_FLOOR_SHARE := 0.5
+const RTT_FLOOR_MIN_BPS := 18000
 ## probe ceiling: configured x this, at most PROBE_CAP_BPS (the host-wide body
 ## upload cap, replicator_host.gd HOST_UPLOAD_BPS; not preloaded: it preloads us)
 const PROBE_FACTOR := 3
@@ -63,6 +69,8 @@ var probe_backs := 0
 var last_loss := 0.0
 var last_rtt := -1
 var _rtts: Array = []            # [[t_ms, rtt_ms]] of the last MIN_WINDOW_MS
+var _lossy: Array = []           # [[t_ms, rtt_ms]] kept out of _rtts for loss, same window
+var _last_admit_ms := -1         # when a sample last entered _rtts
 var _bad_since := -1
 var _clean_since := -1
 var _quiet_since := -1
@@ -87,9 +95,10 @@ static func ceiling_for(cfg: int) -> int:
 	return maxi(cfg, mini(cfg * PROBE_FACTOR, PROBE_CAP_BPS))
 
 
-## The floor a cut may reach: FLOOR_BPS with loss evidence, else RTT_FLOOR_SHARE x configured.
+## The floor an RTT-only cut may reach (loss evidence may go to FLOOR_BPS):
+## RTT_FLOOR_SHARE x configured, at least RTT_FLOOR_MIN_BPS, never above configured.
 func rtt_floor() -> int:
-	return maxi(FLOOR_BPS, roundi(configured * RTT_FLOOR_SHARE))
+	return mini(configured, maxi(RTT_FLOOR_MIN_BPS, roundi(configured * RTT_FLOOR_SHARE)))
 
 
 ## One quality report (netq, about 1 s): loss in 0..1, rtt in ms (-1 unknown).
@@ -137,18 +146,31 @@ func report(now_ms: int, loss: float, rtt_ms: int, overload: float = 1.0) -> voi
 
 ## min_rtt = the minimum of the reports of the last MIN_WINDOW_MS. A report with
 ## loss over BAD_LOSS only enters the window when it lowers the minimum (or is
-## the first): otherwise a lasting bottleneck (queue + loss) would become the
-## new baseline after one window and the loss cut would let go while it lasts.
-## Without new samples the last minimum stays (persistent mild loss keeps it).
+## the first), so a queue + loss bottleneck does not become the baseline while
+## the cut works on it. When nothing entered for a whole MIN_WINDOW_MS (every
+## report lossy, the clean ones aged out) the lowest lossy report of the window
+## is the minimum: the loss cut has had a full window at its floor, and lasting
+## 5-15 % loss with a slower route (Wi-Fi, relay change) would otherwise keep
+## "queueing" true and the budget at FLOOR_BPS for the rest of the session. A
+## real bottleneck that is given the bytes back raises the RTT or the loss
+## again and is cut again. Without any RTT the last minimum stays.
 func _window_rtt(now_ms: int, rtt_ms: int, loss: float) -> void:
-	if rtt_ms > 0 and (loss <= BAD_LOSS or min_rtt < 0 or rtt_ms <= min_rtt):
-		_rtts.append([now_ms, rtt_ms])
-	while not _rtts.is_empty() and now_ms - int(_rtts[0][0]) > MIN_WINDOW_MS:
-		_rtts.pop_front()
+	if rtt_ms > 0:
+		if loss <= BAD_LOSS or min_rtt < 0 or rtt_ms <= min_rtt:
+			_rtts.append([now_ms, rtt_ms])
+			_last_admit_ms = now_ms
+		else:
+			_lossy.append([now_ms, rtt_ms])
+	for w in [_rtts, _lossy]:
+		while not w.is_empty() and now_ms - int(w[0][0]) > MIN_WINDOW_MS:
+			w.pop_front()
+	var src: Array = _rtts
 	if _rtts.is_empty():
-		return    # keep the last minimum while no RTT arrives
-	var m := int(_rtts[0][1])
-	for s in _rtts:
+		if _lossy.is_empty() or now_ms - _last_admit_ms < MIN_WINDOW_MS:
+			return    # keep the last minimum (no RTT, or the lossy run is shorter than a window)
+		src = _lossy
+	var m := int(src[0][1])
+	for s in src:
 		m = mini(m, int(s[1]))
 	min_rtt = m
 

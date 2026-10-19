@@ -65,7 +65,12 @@ func test_left_peer_snapshot() -> void:
 		assert_true(snap.budget.has("eff_bps"), "its budget row from before on_peer_left: %s" % str(snap.budget))
 		assert_true(snap.meter.size() > 0 and snap.meter.any(func(w): return int(w.tx) > 0), "its last seconds of traffic")
 	assert_eq(h.session.peer_rtt_ms(cp), -1, "live RTT forgotten")
-	assert_true(h.session.log_lines.any(func(l): return String(l).contains("peer %d leaving" % cp)), "logged once")
+	var leaving := func() -> int: return h.session.log_lines.filter(func(l): return String(l).contains("peer %d leaving" % cp)).size()
+	assert_eq(leaving.call(), 1, "logged once")
+	# a disconnect after the bye drops the same peer again: no second snapshot or line
+	h.session._drop_peer(cp, "dropped", false)
+	assert_eq(leaving.call(), 1, "still logged once after a second drop")
+	assert_eq(String(h.session.dump().left_peers[cp].why), "left", "the first snapshot is kept")
 
 
 func test_fmt_kv_consumes_any_keys() -> void:

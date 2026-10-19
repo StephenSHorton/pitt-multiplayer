@@ -68,6 +68,13 @@ func test_rtt_only_floor_and_window() -> void:
 	for t in range(1000, 40000, 1000):
 		w.report(t, 0.0, 60)
 	assert_eq(w.min_rtt, 60, "a sample older than the window no longer sets the minimum")
+	# "low": half of 24 KB/s would be the 12 KB/s loss floor itself
+	var lo := Budget.new("low")
+	assert_eq(lo.rtt_floor(), Budget.RTT_FLOOR_MIN_BPS, "low: the RTT-only floor is 18 KB/s")
+	_feed(lo, 0, 5000, 0.0, 40)
+	var rl := _feed(lo, 5000, 25000, 0.0, 400)
+	assert_eq(int(rl[0]), 18000, "low: RTT-only congestion stops at 18 KB/s, above the loss floor")
+	assert_eq(Budget.new("high").rtt_floor(), 48000, "high: half of 96 KB/s")
 
 
 func test_real_loss_still_cuts() -> void:
@@ -75,16 +82,37 @@ func test_real_loss_still_cuts() -> void:
 	_feed(b, 0, 5000, 0.0, 50)
 	_feed(b, 5000, 60000, 0.20, 50)
 	assert_eq(b.bps, Budget.FLOOR_BPS, "20 % loss cuts to the 12 KB/s floor")
+	_feed(b, 60000, 150000, 0.20, 50)
+	assert_eq(b.bps, Budget.FLOOR_BPS, "and stays there while the loss lasts (no window lets it go)")
 	var q := Budget.new("normal")
 	_feed(q, 0, 5000, 0.0, 50)
-	var rq := _feed(q, 5000, 90000, 0.10, 90)
+	var rq := _feed(q, 5000, 30000, 0.10, 90)
 	assert_eq(q.bps, Budget.FLOOR_BPS, "10 % loss while queueing (RTT +40 ms) also reaches the floor")
-	assert_eq(q.min_rtt, 50, "lossy reports do not become the RTT baseline, so the cut holds past one window")
-	assert_true(int(rq[1]) <= 48000, "no recovery while the bottleneck lasts")
+	assert_eq(q.min_rtt, 50, "lossy reports do not become the RTT baseline inside the window")
+	assert_true(int(rq[1]) <= 48000, "no recovery inside the window")
 	var rnd := Budget.new("normal")
 	var r := _feed(rnd, 0, 60000, 0.10, 50)
 	assert_eq(int(r[0]), 48000, "10 % loss at a steady RTT: no cut")
 	assert_eq(int(r[1]), 48000, "and no probe above configured either")
+
+
+func test_lasting_loss_with_slower_route_recovers() -> void:
+	# Wi-Fi-like lasting 8 % loss plus a route change 50 -> 120 ms: no report of the
+	# new route is clean, so without the lossy fallback the minimum stayed 50, every
+	# report read as queueing + loss, and the budget sat at 12 KB/s for good.
+	var b := Budget.new("normal")
+	_feed(b, 0, 20000, 0.0, 50)
+	var cut := _feed(b, 20000, 50000, 0.08, 120)
+	assert_eq(int(cut[0]), Budget.FLOOR_BPS, "the loss cut works for a window first")
+	assert_eq(b.min_rtt, 50, "the old minimum holds inside the window")
+	var rec := _feed(b, 50000, 120000, 0.08, 120)
+	assert_eq(b.min_rtt, 120, "after a whole window of lossy reports their lowest is the minimum")
+	assert_eq(b.bps, b.configured, "recovered to the configured value (%d)" % b.bps)
+	assert_true(int(rec[1]) <= b.configured, "no probe above configured while the loss is over 5 %")
+	# a real bottleneck given the bytes back: the RTT rises over the new minimum again -> cut again
+	var downs: int = b.downs
+	_feed(b, 120000, 130000, 0.08, 170)
+	assert_true(b.downs > downs and b.bps < b.configured, "a renewed queue + loss cuts again (%d)" % b.bps)
 
 
 func test_probe_up_capped_and_backs_off() -> void:
@@ -150,7 +178,15 @@ func test_steam_send_rate_setter() -> void:
 	assert_false(TransportSteam.apply_send_rate(s, -1, 11, 512000), "constant missing (GodotSteam absent)")
 	assert_eq(TransportSteam.steam_const("NETWORKING_CONFIG_SEND_RATE_MAX"), -1 if not ClassDB.class_exists("Steam") else
 		ClassDB.class_get_integer_constant("Steam", "NETWORKING_CONFIG_SEND_RATE_MAX"), "constants through ClassDB")
-	assert_true(TransportSteam.SEND_RATE_BPS > Budget.PROBE_CAP_BPS, "the clamp sits above the probe cap")
+	# the rate follows the host's tier and stays off Steam's default unless the tier needs more
+	assert_eq(TransportSteam.send_rate_target("normal", 0), 0, "normal (ceiling 144 KB/s): Steam's own rate stays")
+	assert_eq(TransportSteam.send_rate_target("low", 0), 0, "low: Steam's own rate stays")
+	assert_eq(TransportSteam.send_rate_target("", 0), 0, "client: Steam's own rate stays")
+	var hi := TransportSteam.send_rate_target("high", 0)
+	assert_eq(hi, Budget.ceiling_for(96000) + TransportSteam.SEND_RATE_HEADROOM_BPS, "high: the probe ceiling plus headroom")
+	assert_true(hi > TransportSteam.STEAM_DEFAULT_SEND_RATE_BPS and hi < 512000, "above the default, well under the old fixed 512 KB/s")
+	assert_eq(TransportSteam.send_rate_target("normal", hi), TransportSteam.STEAM_DEFAULT_SEND_RATE_BPS,
+		"after a raised session the process-wide value goes back to the default")
 
 
 ## Last: a script error aborts a test silently (it would look passed), so none may occur.

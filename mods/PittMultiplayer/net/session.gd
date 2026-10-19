@@ -593,6 +593,7 @@ func _on_lobby_entered(info: Dictionary) -> void:
 			_log("warn", "transport host failed: %s" % error_string(err))
 			_leave("error", "could not open the host transport (%s)" % error_string(err), false)
 			return
+		_log_send_rate()
 		roster.add(1, lobby.get_local_name() if lobby.has_method("get_local_name") else "Host",
 			String(info.get("owner_id", "")), true)
 		authority = MpAuthority.new(self, "host", 1)
@@ -612,9 +613,16 @@ func _on_lobby_entered(info: Dictionary) -> void:
 		if err2 != OK:
 			_leave("error", "could not connect (%s)" % error_string(err2), false)
 			return
+		_log_send_rate()
 		sub = "connecting"
 		_set_deadline(HANDSHAKE_TIMEOUT_MS + 2000, "timeout")
 		_set_state("lobby")
+
+
+## Once per session: the Steam send-rate clamp this process applied (none: Steam's own).
+func _log_send_rate() -> void:
+	if transport != null and "send_rate_bps" in transport and int(transport.send_rate_bps) > 0:
+		_log("info", "steam send rate set to %d B/s (min = max)" % int(transport.send_rate_bps))
 
 
 func _on_lobby_left(reason: String) -> void:
@@ -644,6 +652,9 @@ func _make_transport(kind: String):
 		"steam":
 			var s = TransportSteam.new()
 			s.mode = String(config.get("steam_peer_mode", "socket"))
+			# the host's tier sets Steam's send-rate clamp (transport_steam.gd send_rate_target)
+			if role == "host":
+				s.physics_detail = String(config.get("physics_detail", "normal"))
 			return s
 		"loopback":
 			return TransportLoopback.new()
