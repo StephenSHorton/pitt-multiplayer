@@ -150,6 +150,14 @@ var counters := {"kicked_rate": 0, "rejected": 0, "joins_served": 0, "early_chun
 	"world_buffered": 0, "world_dropped": 0, "wsnaps_served": 0,
 	"world_too_large": 0, "wsnap_send_failed": 0, "world_rx": 0, "world_tx": 0}
 var _last_stats_ms := 0
+## host: per-peer RTT from the pongs to our pings (EWMA like Clock.rtt_ms), peer -> ms
+var _peer_rtt: Dictionary = {}
+## host: net / budget snapshot of each peer that left (dump "left_peers"), taken
+## before on_peer_left drops the replicator's per-peer state
+var _left_stats: Dictionary = {}
+const LEFT_STATS_MAX := 16
+const RTT_ALPHA := 0.2
+const RTT_MAX_MS := 60000
 
 # ---- MP2 module registry (10.1)
 var _modules: Array = []
@@ -814,7 +822,7 @@ func _host_on_msg(peer: int, msg: Dictionary) -> void:
 		"ping":
 			_send(peer, "pong", {"t0": int(msg.get("t0", 0)), "host_ms": clock.now()})
 		"pong":
-			pass
+			_host_on_pong(peer, msg.get("t0", null))
 		"join_req":
 			_host_on_join_req(peer)
 		"ready":
@@ -840,6 +848,21 @@ func _host_on_msg(peer: int, msg: Dictionary) -> void:
 				_on_cheats_used()
 		_:
 			_route_ch0(peer, String(msg.k), msg)
+
+
+## One pong to our ping: RTT = now - t0 (our clock), smoothed per peer.
+func _host_on_pong(peer: int, t0: Variant) -> void:
+	if typeof(t0) != TYPE_INT and typeof(t0) != TYPE_FLOAT:
+		return
+	var rtt: int = clock.now() - int(t0)
+	if rtt < 0 or rtt > RTT_MAX_MS:
+		return
+	_peer_rtt[peer] = float(rtt) if not _peer_rtt.has(peer) else lerpf(float(_peer_rtt[peer]), float(rtt), RTT_ALPHA)
+
+
+## Host: the smoothed RTT to `peer` in ms (-1 before its first pong).
+func peer_rtt_ms(peer: int) -> int:
+	return roundi(float(_peer_rtt[peer])) if _peer_rtt.has(peer) else -1
 
 
 func _host_on_hello(peer: int, msg: Dictionary) -> void:
@@ -1109,6 +1132,9 @@ func on_host_phase(kind: String, p: int) -> void:
 
 
 func _drop_peer(peer: int, why: String, graceful: bool) -> void:
+	if role == "host" and roster.has(peer):
+		_snapshot_left_peer(peer, why)
+	_peer_rtt.erase(peer)
 	_hello_wait.erase(peer)
 	_member_wait.erase(peer)
 	_join_queue = _join_queue.filter(func(e): return int(e.peer) != peer)
@@ -1784,6 +1810,8 @@ func _reset_vars() -> void:
 	_wcut_q = 0
 	_world_buffer = []
 	_early_wchunks = []
+	_peer_rtt.clear()
+	_left_stats.clear()
 
 
 func _exit_tree() -> void:
@@ -2158,12 +2186,130 @@ func stats_line() -> String:
 	var ents := "tracked %d awake %d" % [int(bc.get("tracked", 0)), int(bc.get("awake", 0))] if role == "host" 		else "puppets %d records_rx %d orphans %d strays %d" % [int(bc.get("puppets", 0)), int(bc.get("records_rx", 0)),
 			int(bc.get("orphan_frames", 0)), int(bc.get("stray_spawns", 0))]
 	var bad_lane := int(transport.stats.get("bad_lane", 0)) if transport != null else 0
-	return "mp stats: %s %s/%s peers %d rtt %d ms | %s | drops %s%s | world rx %d tx %d buffered %d dropped %d | %s | avatars %d" % [
-		role, state, host_state, roster.peers().size() if roster != null else 0, int(clock.rtt_ms) if clock != null else -1,
+	# rtt: a client's own clock; on the host the mean over its peers (its clock has none)
+	var rtt := int(clock.rtt_ms) if clock != null else -1
+	if role == "host":
+		rtt = _mean_peer_rtt()
+	var line := "mp stats: %s %s/%s peers %d rtt %d ms | %s | drops %s%s | world rx %d tx %d buffered %d dropped %d | %s | avatars %d" % [
+		role, state, host_state, roster.peers().size() if roster != null else 0, rtt,
 		", ".join(chs), JSON.stringify(proto.drop_reasons) if proto != null else "{}",
 		" bad_lane %d" % bad_lane if bad_lane > 0 else "",
 		int(counters.world_rx), int(counters.world_tx), int(counters.world_buffered), int(counters.world_dropped),
 		ents, avatars.puppet_count() if avatars != null else 0]
+	# appended after the original fields (log parsers read those by position):
+	# host replicator totals, then per peer its RTT and budget row
+	if role == "host" and roster != null:
+		var hs := _bodies_host_stats()
+		var top := _fmt_kv(hs, ["tracked", "awake", "peers"])
+		if top != "":
+			line += " | host %s" % top
+		for p in roster.peers():
+			if p == 1:
+				continue
+			line += " | peer %d rtt %d" % [p, peer_rtt_ms(p)]
+			var kv := _fmt_kv(_peer_budget_info(p, hs), [])
+			if kv != "":
+				line += " " + kv
+	return line
+
+
+func _mean_peer_rtt() -> int:
+	if _peer_rtt.is_empty():
+		return -1
+	var sum := 0.0
+	for p in _peer_rtt:
+		sum += float(_peer_rtt[p])
+	return roundi(sum / float(_peer_rtt.size()))
+
+
+## The bodies module's host replicator (null on a client / without MP2).
+func _bodies_host() -> Object:
+	var b = get_module("bodies")
+	if b == null or not ("host" in b):
+		return null
+	var h = b.get("host")
+	return h if h is Object else null
+
+
+## The host replicator's stats() ({} when it has none).
+func _bodies_host_stats() -> Dictionary:
+	var h := _bodies_host()
+	if h == null or not h.has_method("stats"):
+		return {}
+	var s = h.stats()
+	return s if typeof(s) == TYPE_DICTIONARY else {}
+
+
+## One peer's budget / link numbers from the host replicator: its
+## peer_budget_info(peer) when present, else that peer's row of stats().
+func _peer_budget_info(peer: int, host_stats: Dictionary = {}) -> Dictionary:
+	var h := _bodies_host()
+	if h != null and h.has_method("peer_budget_info"):
+		var d = h.peer_budget_info(peer)
+		if typeof(d) == TYPE_DICTIONARY:
+			return d
+	var per = host_stats.get("peers", {})
+	if typeof(per) == TYPE_DICTIONARY:
+		var row = per.get(peer, null)
+		if typeof(row) == TYPE_DICTIONARY:
+			return row
+	return {}
+
+
+## "k v k2 v2 ..." of a dictionary's scalar values (sorted keys, floats to 2
+## places, one level of nested dictionaries as parent.key), skipping `skip`.
+static func _fmt_kv(d: Dictionary, skip: Array) -> String:
+	var keys: Array = d.keys()
+	keys.sort_custom(func(a, b): return str(a) < str(b))
+	var parts: PackedStringArray = []
+	for k in keys:
+		if k in skip:
+			continue
+		var v = d[k]
+		if typeof(v) == TYPE_DICTIONARY:
+			var sub_keys: Array = v.keys()
+			sub_keys.sort_custom(func(a, b): return str(a) < str(b))
+			for k2 in sub_keys:
+				var s2 := _fmt_scalar(v[k2])
+				if s2 != "":
+					parts.append("%s.%s %s" % [str(k), str(k2), s2])
+			continue
+		var s := _fmt_scalar(v)
+		if s != "":
+			parts.append("%s %s" % [str(k), s])
+	return " ".join(parts)
+
+
+static func _fmt_scalar(v: Variant) -> String:
+	match typeof(v):
+		TYPE_INT:
+			return str(v)
+		TYPE_FLOAT:
+			return "%.2f" % float(v)
+		TYPE_BOOL:
+			return "1" if bool(v) else "0"
+		TYPE_STRING, TYPE_STRING_NAME:
+			return String(v)
+	return ""
+
+
+## Host, before a leaving peer's state is cleared: its RTT, budget row and the
+## last seconds of its byte meter (window_stats is already empty a second after
+## its traffic stopped, and a silence drop comes 15 s later), kept for dump()
+## and logged once.
+func _snapshot_left_peer(peer: int, why: String) -> void:
+	var hs := _bodies_host_stats()
+	var snap := {"at": clock.now(), "why": why, "rtt_ms": peer_rtt_ms(peer),
+		"budget": _peer_budget_info(peer, hs).duplicate(true), "net": net_stats().get(peer, {})}
+	if transport != null and transport.has_method("meter_history"):
+		var hist: Array = []
+		for w in transport.meter_history(peer).slice(-10):
+			hist.append({"t": int(w.get("t", 0)), "tx": int(w.get("tx", 0)), "rx": int(w.get("rx", 0))})
+		snap["meter"] = hist
+	if _left_stats.size() >= LEFT_STATS_MAX and not _left_stats.has(peer):
+		_left_stats.erase(_left_stats.keys()[0])
+	_left_stats[peer] = snap
+	_log("info", "mp stats: peer %d leaving (%s) rtt %d %s" % [peer, why, int(snap.rtt_ms), _fmt_kv(snap.budget, [])])
 
 
 ## user://pittapi[-<instance>]/mp_session_last.json: dump() of the session that just ended.
@@ -2196,4 +2342,6 @@ func dump() -> Dictionary:
 			"puppets": avatars.puppet_count()},
 		"mp2": {"modules": _mod_by_name.keys(), "world_live": _world_live, "world_flow": _world_flow,
 			"world_peers": world_peers() if role != "" else []},
-		"counters": counters_all(), "net": net_stats(), "log": log_lines.slice(-30)}
+		"counters": counters_all(), "net": net_stats(), "log": log_lines.slice(-30),
+		"peer_rtt_ms": _peer_rtt.duplicate(), "left_peers": _left_stats.duplicate(true),
+		"bodies_host": _bodies_host_stats().duplicate(true)}

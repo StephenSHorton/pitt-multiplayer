@@ -273,13 +273,21 @@ partial sort; the host spends at most **2 ms per tick** on selection for all pee
 tick when over (`sel_overrun`). Motion values are computed once per tick and shared by all peers.
 
 **Budget (`budget.gd`).** `budget_bps(c)` starts at the `physics_detail` value (24 / 48 / 96 KB/s) and adapts
-from `netq` and ping RTT: loss > 5 % or RTT > 2× the session minimum for 2 s → ×0.7 (floor 12 KB/s); clean
-for 5 s → +10 % per second up to the configured value. Avatars (about 1 KB/s per player), econ and control
-are outside this budget.
+from `netq` and the client's ping RTT. The RTT minimum is the minimum of the last 30 s of reports (a
+slower route becomes the new baseline). Congestion for 2 s → ×0.7 every 2 s: loss > 15 %, or loss > 5 %
+while the RTT rose 20 ms over the minimum, may cut to the 12 KB/s floor; RTT alone (> 2× the minimum and
+> minimum + 50 ms) cuts at most to half the configured value, and is ignored while the host is overloaded.
+Clean for 5 s → +15 % of the configured value per second up to it. Probe-up: quiet (no queueing, loss ≤ 5 %)
+for 10 s at the configured value → +5 % of it per second up to a ceiling of 3× configured (at most
+400 KB/s, the host-wide upload cap); any queueing or loss above the configured value drops straight back
+to it and holds the probe off for 30 s. The Steam transport sets SteamNetworkingSockets' global
+SendRateMin/Max to 512 KB/s so Steam's own pacing never sits below the ceiling. Avatars (about 1 KB/s per
+player), econ and control are outside this budget.
 
 **Physics overload guard.** If `Performance.TIME_PHYSICS_PROCESS` exceeds 80 % of the 16.7 ms tick for 5 s,
 the host halves every budget (fewer, staler updates; never a tick change, D23) and shows the host
-`MP_PHYSICS_OVERLOADED` at most once a minute.
+`MP_PHYSICS_OVERLOADED` at most once a minute. With one in-game peer the halving does not apply to bytes
+(`Budget.bytes_for(..., n_peers = 1)`): it would only starve the only client.
 
 ### 3.4 Client replicator (`world/bodies/replicator_client.gd`, `world/bodies/puppet_body.gd`)
 
@@ -886,7 +894,7 @@ moving faster than 0.5 m/s, `now − last_update` p95 ≤ 150 ms at normal detai
 | Same-frame recycle + respawn of one node | L8 reuse detection → new eid; else the host's `SNAP` heuristic | `test_entities` reuse case |
 | Fixture key resolves on one side only | logged, ignored | `fixture_mismatch` |
 | Host overloaded (thousands of awake bodies) | 2 ms selection cap, budget halving, toast; the tick never changes | `sel_overrun` |
-| Client bandwidth drop / loss | adaptive budget (×0.7 / +10 %/s), floor 12 KB/s | `budget_bps` in `mp stats` |
+| Client bandwidth drop / loss | adaptive budget (×0.7 / +15 %/s, probe to 3× while clean), floor 12 KB/s on loss, half the configured value on RTT alone | `budget_bps`, per-peer `rtt` in `mp stats` |
 | Owner silent / gone / paused | revoke after 1.5 s, on disconnect, via the pause guard release | G-scenarios |
 | Grab race (two peers, or host and client) | host first-come on ordered ch3; host player through the same table | G2 |
 | Held body desync or cheating | distance check vs the owner's avatar, epoch check, rate limit | `held_rejected` |
@@ -1182,7 +1190,7 @@ grant path), `extensions/pause_menu_ext.gd`, `sync/progression.gd`, and the exis
 | Suite (owner) | Covers |
 |---|---|
 | `test_mp2_bodies_codec` | frames 4/5 round trip, quantisation error bounds (pos ≤ 0.5 mm, rot ≤ 0.1°), NaN/overrun rejection, 1200 B packing |
-| `test_mp2_bodies_priority` / `_budget` | weights, starvation (every awake body sent within 3 s at 200 bodies), byte budget per tick, adaptive ×0.7 / +10 %, 2 ms selection cap |
+| `test_mp2_bodies_priority` / `_budget` | weights, starvation (every awake body sent within 3 s at 200 bodies), byte budget per tick, adaptive ×0.7 / +15 %, windowed RTT minimum, probe-up ceiling, single-peer overload, 2 ms selection cap |
 | `test_mp2_bodies_interp` | Hermite/slerp, extrapolation cap, SNAP, blend, sleep exactness, unknown-eid buffer, tombstones, under loopback 100 ms ± 30 / 5 % loss |
 | `test_mp2_bodies_meta` | save-schema read/apply field by field on stub nodes, diffing, never `apply_loaded_bag/queue` on clients |
 | `test_mp2_bodies_stray` / `_wsnap` | stray recycle, expected-source silence; wsnap cut + ch3 replay ordering under reordered delivery, batch apply, sha mismatch |

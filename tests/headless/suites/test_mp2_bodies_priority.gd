@@ -88,7 +88,8 @@ func test_budget_adapts() -> void:
 	assert_eq(b.bps, 48000, "floor to normal within 15 s of a clean link (5 s hold + 5 steps)")
 	for t in range(54000, 80000, 1000):
 		b.report(t, 0.0, 40)
-	assert_eq(b.bps, 48000, "back to the configured value, never above")
+	# probe-up (P5): a quiet link at the configured value probes above it, never past the ceiling
+	assert_true(b.bps > 48000 and b.bps <= b.ceiling, "a clean link probes above configured, up to the ceiling (%d)" % b.bps)
 	var r := Budget.new("normal")
 	r.report(0, 0.0, 30)
 	r.report(1000, 0.0, 200)
@@ -99,8 +100,9 @@ func test_budget_adapts() -> void:
 	for t in range(1000, 8000, 1000):
 		lan.report(t, 0.0, 30)
 	assert_eq(lan.bps, 48000, "1 ms minimum, 30 ms pings: within the 50 ms slack, no cut")
-	assert_eq(b.bytes_per_tick(30.0), 1600, "48000 / 30")
-	assert_eq(b.bytes_per_tick(30.0, 0.5), 800, "overload halves")
+	var nb := Budget.new("normal")
+	assert_eq(nb.bytes_per_tick(30.0), 1600, "48000 / 30")
+	assert_eq(nb.bytes_per_tick(30.0, 0.5), 800, "overload halves")
 	var fl := Budget.new("normal")
 	fl.bps = 12000
 	assert_eq(fl.bytes_per_tick(30.0, 0.5), 400, "overload never below the 12 KB/s floor")

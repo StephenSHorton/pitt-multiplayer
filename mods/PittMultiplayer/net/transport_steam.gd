@@ -17,11 +17,28 @@ extends "transport.gd"
 ## transport's lane map (lane_map, on by default) puts CH_WORLD on lane 1 with a
 ## one-byte channel tag. v0.2.0 sent CH_WORLD on lane 3: it arrived on lane 0 and
 ## was dropped (kind_not_allowed), so clients saw no spawns and no grant/interact.
+## Send rate: SteamNetworkingSockets paces every connection to its SendRateMin /
+## SendRateMax clamp and queues (never drops) what is over it, so a body budget
+## that probes above the clamp (budget.gd ceiling, up to 400 KB/s) would only
+## grow Steam's queue. The bundled GodotSteam 4.19.1 exposes no per-connection
+## handle on SteamMultiplayerPeer (its properties are no_delay, no_nagle,
+## server_relay, debug_level), but the Steam singleton has
+## setGlobalConfigValueInt32(NetworkingConfigValue, int) -> bool and the enum
+## values NETWORKING_CONFIG_SEND_RATE_MIN / _MAX (both found in the bundled
+## DLL's method binds and constant names). The global value is set before
+## create_host / create_client, so every connection made after it inherits it.
+## Min and max get the same value (the Steamworks header advises setting both
+## to configure a send rate); budget.gd stays the congestion brake.
 
 const VIRTUAL_PORT := 0
+## per-connection send-rate clamp: above the body probe cap (400 KB/s) plus
+## avatars, control and the world stream
+const SEND_RATE_BPS := 512000
 
 var mode := "socket"
 var _relay_inited := false
+## 0 until the send rate was set on the Steam singleton
+var send_rate_bps := 0
 
 
 func kind() -> String:
@@ -47,6 +64,29 @@ func _init_relay() -> void:
 	var steam = Engine.get_singleton("Steam")
 	if steam != null and steam.has_method("initRelayNetworkAccess"):
 		steam.initRelayNetworkAccess()
+	if apply_send_rate(steam, steam_const("NETWORKING_CONFIG_SEND_RATE_MIN"),
+			steam_const("NETWORKING_CONFIG_SEND_RATE_MAX"), SEND_RATE_BPS):
+		send_rate_bps = SEND_RATE_BPS
+	stats["send_rate"] = send_rate_bps
+
+
+## A Steam class constant through ClassDB (-1 when GodotSteam is absent), so this
+## script parses and runs headless without the Steam class.
+static func steam_const(const_name: String) -> int:
+	if ClassDB.class_exists("Steam") and ClassDB.class_has_integer_constant("Steam", const_name):
+		return ClassDB.class_get_integer_constant("Steam", const_name)
+	return -1
+
+
+## Sets the global SendRateMin and SendRateMax on `steam` (the Steam singleton,
+## or a test double). True when both calls exist and both returned true.
+static func apply_send_rate(steam: Object, key_min: int, key_max: int, rate: int) -> bool:
+	if steam == null or key_min < 0 or key_max < 0 or not steam.has_method("setGlobalConfigValueInt32"):
+		return false
+	# max first: a min above the current max could be refused
+	var ok_max := bool(steam.call("setGlobalConfigValueInt32", key_max, rate))
+	var ok_min := bool(steam.call("setGlobalConfigValueInt32", key_min, rate))
+	return ok_max and ok_min
 
 
 func _make_peer() -> MultiplayerPeer:
