@@ -333,6 +333,8 @@ release state one way later and is drawn `interp_delay` behind, so the stream is
 local pose's lead along its velocity (≤ 400 ms, fading out over 1 s: the body slows briefly instead of
 jumping back) and the rest blends over 150 ms. With no such record within 1 s any host record will do; with
 none at all within 3 s the local pose is kept (`release_kept_local`) and the next record blends from it.
+A grab that ends in its own epoch (deny, undo, pending timeout) hands back to the newest pre-grab state,
+kept aside when the ring was cleared: the host never moved the body and may send nothing while it sleeps.
 
 **Riders (0.2.2).** A body GRAB carries (local_sim, not equipped) takes the puppets in or on it along: every
 pooled puppet it touches (`get_colliding_bodies`; the game's carry turns `contact_monitor` on) or whose

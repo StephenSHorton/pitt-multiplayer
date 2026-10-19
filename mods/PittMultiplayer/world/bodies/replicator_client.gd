@@ -117,6 +117,7 @@ class Drive:
 	var still := false            # the last write was a still pose (before / hold / sleep, no blend)
 	var lead_ms := 0              # release lead at lead_start_ms
 	var lead_start_ms := 0
+	var pregrab: Dictionary = {}  # the newest state when the ring was cleared (a deny hands back to it)
 
 	## True when the ring changed since the last call (new data).
 	func ring_changed(ring: Array) -> bool:
@@ -746,11 +747,16 @@ func set_local_sim(eid: int, on: bool, min_epoch: int) -> void:
 		pb.local_sim = true
 		pb.release_wait = false
 		# P8: the host sends nothing of a body to its owner, so whatever the ring
-		# holds now is pre-grab; it must never be drawn after the release
+		# holds now is pre-grab; it must never be drawn after a carry. The newest
+		# state is kept aside for a grab that ends in the same epoch (deny, undo):
+		# the host never moved the body and may send nothing more while it sleeps.
+		var keep := pb.newest()
 		pb.ring.clear()
 		pb.last_epoch = -1
 		pb.corr0 = Vector3.ZERO
 		_drv.erase(eid)
+		if not keep.is_empty():
+			_drive_of(pb).pregrab = keep
 		_remove_exception(pb)
 		if node is RigidBody3D:
 			node.freeze = false
@@ -780,6 +786,13 @@ func _handoff_t(pb: PuppetBody, any_epoch: bool) -> int:
 ## flying) until the render time passes the first record it can hand over to;
 ## then it becomes a puppet again (P8, see header).
 func _check_release(pb: PuppetBody, now: int) -> void:
+	var d0: Drive = _drv.get(pb.eid, null)
+	if d0 != null and not d0.pregrab.is_empty() and _handoff_t(pb, false) < 0 \
+			and PuppetBody.epoch_reached(int(d0.pregrab.get("epoch", 0)), pb.min_epoch):
+		# a grab that ended in its own epoch (deny, undo): the pre-grab state is
+		# still the host's pose. A carry asks for epoch + 1 and never gets here.
+		Interp.ring_push(pb.ring, d0.pregrab)
+		d0.pregrab = {}
 	var late := now >= pb.release_until_ms
 	var t0 := _handoff_t(pb, late)
 	var rt := _host_now() - interp_delay
@@ -806,6 +819,7 @@ func _check_release(pb: PuppetBody, now: int) -> void:
 	pb.corr0 = Vector3.ZERO
 	d.rc = Vector3.ZERO
 	d.lead_ms = 0
+	d.pregrab = {}
 	if t0 < 0:
 		# nothing from the host in time: keep the local pose (never a pre-grab
 		# one); the next record blends from here, whatever its epoch

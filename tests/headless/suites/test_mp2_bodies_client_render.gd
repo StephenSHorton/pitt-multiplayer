@@ -377,6 +377,29 @@ func test_release_without_host_records_keeps_the_local_pose() -> void:
 	assert_true(n.global_position.distance_to(Vector3(3.2, 0.2, 1)) < 0.0001, "then the host pose")
 
 
+## A denied / undone grab of a sleeping body ends in its own epoch: the host
+## never moved it and may send nothing for a long time, so the state the ring
+## held before the grab is handed back to (a blend, no 3 s wait).
+func test_denied_grab_returns_to_the_pre_grab_pose() -> void:
+	var c := _client()
+	var pb := _puppet(c, 13)
+	var n := pb.node()
+	var rest := Vector3(2, 0.1, -1)
+	_feed(c, pb, _s(c.t_host - 500, rest, Vector3.ZERO, Codec.RF_SLEEP, Quaternion.IDENTITY, Vector3.ZERO, 4))
+	_step(c)
+	c.set_local_sim(13, true, 0)
+	assert_eq(pb.ring.size(), 0, "ring cleared for the prediction")
+	n.global_position = rest + Vector3(0, 0.4, 0.3)   # the predicted carry lifted it
+	_step(c)
+	c.set_local_sim(13, false, 4)                     # deny: same epoch
+	for i in (c.interp_delay + int(c.BLEND_MS)) / FRAME_MS + 2:
+		_step(c)
+	assert_false(pb.local_sim, "a puppet again")
+	assert_true(n.global_position.distance_to(rest) < 0.0001, "back on the host pose (%s)" % str(n.global_position))
+	assert_eq(int(c.counters.release_kept_local), 0, "not the no-record path")
+	assert_eq(int(c.counters.snaps), 1, "blended, not snapped (the one snap is the spawn)")
+
+
 # ------------------------------------------------------------------ stats (P1)
 
 func test_client_stats_keys_and_staleness() -> void:
