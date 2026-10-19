@@ -251,7 +251,14 @@ full meta (3.5). Peers that are still loading get nothing on ch3 until their wor
 - `SLEEP`: `RigidBody3D.sleeping`, or frozen STATIC (placed tools, `panel_state == 1`). A sleeping body is
   sent **once** with `SLEEP`, then repeated at 250 ms, 1 s and 3 s to survive loss; after that only the
   **rest refresh** (one sleeping body per peer per send tick, round-robin, about 570 B/s) heals any loss.
-  A body that wakes is sent at once.
+  A body that wakes is sent at once. Since 0.2.3 the first SLEEP of each rest goes out ahead of the awake
+  records (a FIFO, oldest first, at most 60 % of a tick while bodies are awake); the repeats wait in one FIFO
+  per stage and take at most `SLEEP_SHARE` (40 %) of a tick, after the first sends. `mp stats` carries the
+  backlog and the age of the oldest queued first SLEEP.
+- **Net-rest** (0.2.3): an awake body that nobody holds or follows and whose pose stays within 2 mm / 0.5° for
+  400 ms is treated as resting (SLEEP, repeats, rest refresh) even though Jolt keeps it awake (a pile) or it is
+  a still frozen-KINEMATIC body. A watch compares its pose every send tick and wakes it once it moves 5 mm or
+  turns. A frozen body that is hidden (cannon barrel, vacuum bag) or out of the tree counts as resting.
 - `HELD`: owner ≠ host (GRAB calls `set_owner_view`). Records for an eid are **never sent to its owner**.
 - `NOCOLLIDE`: owner kind `equipped` (the tool sits on someone's rig, 6.4).
 - `epoch`: low byte of the ownership epoch.
@@ -267,6 +274,14 @@ motion_w : 1 + clamp(|v| / 4, 0, 3)
 boost_w  : 3.0 for 2 s after spawn, SNAP, release/throw, an interaction verb on it, or contact with a ghost
 acc[c][e] += w * dt
 ```
+**Change gating (0.2.3).** The sender keeps, per peer, the last record it sent of each awake body (pose,
+velocity as encoded, time). `w` is further multiplied by `change_w(err)`, where `err` is the distance between
+the pose that peer's client extrapolates from that record (as `Interp.sample`: `p + l·t`, `t` at most 250 ms,
+rotation held) and the current pose, plus the rotation angle. `change_w` is 0 below 2 mm and 0.5°, so the
+body is not a candidate for that peer, and `1 + clamp(err / 5 cm + angle / 10°, 0, 3)` otherwise. A body not
+sent to a peer for 1 s is a candidate again whatever its error (the forced refresh, which heals a lost
+record); SNAP and boost bypass the gate, as does a body not yet sent since it woke. LIN is only encoded at
+0.05 m/s or faster (19 B records for still or crawling bodies).
 Each tick the sender takes entities in descending `acc` until the tick's byte budget `budget_bps(c) / 30`
 is used (records 19-31 B, packets ≤ 1200 B), sends them and zeroes their `acc`. Selection is a bucketed
 partial sort; the host spends at most **2 ms per tick** on selection for all peers and resumes the scan next
@@ -279,7 +294,11 @@ are outside this budget.
 
 **Physics overload guard.** If `Performance.TIME_PHYSICS_PROCESS` exceeds 80 % of the 16.7 ms tick for 5 s,
 the host halves every budget (fewer, staler updates; never a tick change, D23) and shows the host
-`MP_PHYSICS_OVERLOADED` at most once a minute.
+`MP_PHYSICS_OVERLOADED` at most once a minute. Since 0.2.3 it sheds CPU first: at most 256 candidates take
+part per send tick (held, SNAP-owing and boosted ones always, the others in a window that moves on every
+tick) and the physics catch-up cap drops from 8 to 4 steps per frame while pinned. With a single peer in game
+the budget is not halved (that only made the one client's view staler; the every-other-tick serve that saves
+CPU needs two or more peers).
 
 ### 3.4 Client replicator (`world/bodies/replicator_client.gd`, `world/bodies/puppet_body.gd`)
 
@@ -885,7 +904,7 @@ moving faster than 0.5 m/s, `now − last_update` p95 ≤ 150 ms at normal detai
 | Pool tables differ | `pools_hash` reject at welcome | handshake test |
 | Same-frame recycle + respawn of one node | L8 reuse detection → new eid; else the host's `SNAP` heuristic | `test_entities` reuse case |
 | Fixture key resolves on one side only | logged, ignored | `fixture_mismatch` |
-| Host overloaded (thousands of awake bodies) | 2 ms selection cap, budget halving, toast; the tick never changes | `sel_overrun` |
+| Host overloaded (thousands of awake bodies) | 2 ms selection cap, at most 256 candidates per tick (held / SNAP / boosted always), physics catch-up steps 8 → 4, budget halving only with two or more peers, toast; the tick never changes | `sel_overrun`, `cand_shed` |
 | Client bandwidth drop / loss | adaptive budget (×0.7 / +10 %/s), floor 12 KB/s | `budget_bps` in `mp stats` |
 | Owner silent / gone / paused | revoke after 1.5 s, on disconnect, via the pause guard release | G-scenarios |
 | Grab race (two peers, or host and client) | host first-come on ordered ch3; host player through the same table | G2 |

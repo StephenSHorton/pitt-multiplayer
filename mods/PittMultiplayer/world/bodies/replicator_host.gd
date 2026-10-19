@@ -6,8 +6,17 @@ extends RefCounted
 ## accumulator and an adaptive byte budget.
 ##   - awake set from RigidBody3D.sleeping_state_changed (+ a round-robin scan
 ##     of resting bodies), so thousands of sleeping bodies cost almost nothing
+##   - net-rest (0.2.3): an awake body nobody holds whose pose stays within 2 mm /
+##     0.5 deg for NET_REST_MS goes to rest like a sleeping one (Jolt piles that never
+##     sleep, still frozen-KINEMATIC bodies); a watch list wakes it when it moves.
+##     A frozen body that is hidden or out of the tree counts as resting
 ##   - a body that comes to rest is sent with SLEEP, repeated at 250 ms, 1 s and
-##     3 s, then only the rest refresh (one resting body per peer per tick)
+##     3 s, then only the rest refresh (one resting body per peer per tick). First
+##     SLEEPs go out before the awake records (FIFO, at most FIRST_SHARE of a tick);
+##     the repeats wait in one FIFO per stage under SLEEP_SHARE
+##   - change gating (0.2.3): per peer the last record sent of each awake body is
+##     kept; a body whose pose matches what that client extrapolates from it is not a
+##     candidate (Priority.change_w), except for the 1 Hz forced refresh, SNAP and boost
 ##   - records of a body are never sent to the peer that owns it (GRAB)
 ##   - host_follow: a body held by a client follows the owner's held stream as a
 ##     frozen kinematic body 50 ms behind; host_release restores it exactly
@@ -17,8 +26,13 @@ extends RefCounted
 ##   - a peer skipped by the per-tick CPU cap (or served every other tick under
 ##     overload) gets the bytes of the ticks it missed at its next serve, so its
 ##     byte rate stays at its budget; stats() reports the measured eff_bps
+##   - overload sheds CPU, not a lone peer's bytes: at most OVERLOAD_CANDIDATES
+##     candidates per tick (held / SNAP / boosted ones always, the rest in turn) and
+##     fewer physics catch-up steps; budgets halve only with two or more peers
 ##   - the budget counts every packet's header plus a transport overhead
 ##     estimate, and HOST_UPLOAD_BPS caps the sum over all peers
+##   - stats() / peer_budget_info(peer): budget, link (last netq), load, candidate
+##     and awake breakdown, SLEEP backlog; flat gauges also go into counters
 
 const Codec = preload("../../net/codec.gd")
 const Priority = preload("priority.gd")
@@ -38,7 +52,17 @@ const SEL_BUDGET_USEC := 3000
 const REST_SCAN_PER_TICK := 40        # minimum; scaled so a lap of every tracked body takes about 1 s
 const REST_SCAN_LAP_TICKS := 30
 const REST_ROT_DOT := 0.99995         # |q.q0| below this (about 1.1 deg): rotated in place
-const SLEEP_SHARE := 0.4              # SLEEP sends take at most this share of a tick while bodies are awake
+const SLEEP_SHARE := 0.4              # SLEEP repeats take at most this share of a tick while bodies are awake
+const FIRST_SHARE := 0.6              # first SLEEPs (and repeats) together at most this share
+const REFRESH_MS := 1000              # an awake body is re-sent at least this often (heals a lost record)
+const LIN_MIN := 0.05                 # m/s: slower bodies are sent without LIN (the client holds them)
+const ANG_MIN_SQ := 0.0025            # (rad/s)^2: faster spin carries ANG
+const EXTRAP_MS := 250                # the client's extrapolation limit (Interp.MAX_EXTRAP_MS)
+const NET_REST_MS := 400              # still this long (pose within STILL_M / STILL_ROT_DOT): net-rest
+const STILL_M := 0.002
+const STILL_ROT_DOT := 0.99999048     # 0.5 deg
+const WATCH_M := 0.005                # a net-rested body that moves this far wakes
+const OVERLOAD_CANDIDATES := 256      # candidates per tick while overloaded (CPU shedding)
 const PKT_OVERHEAD := 40              # per packet: UDP/IP + transport framing (estimate)
 const HOST_UPLOAD_BPS := 400000       # body frames to all peers together (about 3.2 Mbit/s)
 const MAX_SLOTS := 32
@@ -98,6 +122,9 @@ class Ent extends RefCounted:
 	var vis_cb: Callable
 	var kw := 1.0                  # kind weight as seen by a non-owner peer (Priority.kind_w)
 	var ai := -1                   # awake index into every PeerState.accs (-1 = resting)
+	var still_since := -1          # ms the pose has stayed at still_p / still_q (-1 = moving)
+	var still_p := Vector3.ZERO
+	var still_q := Quaternion.IDENTITY
 
 	func node() -> Node3D:
 		var n = ref.get_ref() if ref != null else null
@@ -112,12 +139,54 @@ class Ent extends RefCounted:
 		return f
 
 
+## A FIFO of SLEEP sends of one stage: eid, token (see PeerState.sleep_pending) and
+## a time (first sends: when queued; repeats: when due). Appended in time order, so
+## only the head is ever checked. Stale entries (woken, rescheduled) are skipped.
+class SleepQ extends RefCounted:
+	var eid := PackedInt64Array()
+	var tok := PackedInt32Array()
+	var t := PackedInt64Array()
+	var head := 0
+
+	func push(p_eid: int, p_tok: int, p_t: int) -> void:
+		eid.append(p_eid)
+		tok.append(p_tok)
+		t.append(p_t)
+
+	func size() -> int:
+		return eid.size() - head
+
+	func pop() -> void:
+		head += 1
+		if head >= eid.size():
+			eid.clear()
+			tok.clear()
+			t.clear()
+			head = 0
+		elif head >= 256 and head * 2 >= eid.size():
+			eid = eid.slice(head)
+			tok = tok.slice(head)
+			t = t.slice(head)
+			head = 0
+
+
 class PeerState extends RefCounted:
 	var peer := 0
 	var slot := 0
-	var sleep_sched: Dictionary = {}   # eid -> {t0, n}
-	var sleep_next_ms := 0             # earliest due SLEEP send (0 = walk the schedule)
+	var sleep_pending: Dictionary = {}   # eid -> token of its live SLEEP entry (any stage)
+	var sleep_tok := 0
+	var sleep_first := SleepQ.new()      # first SLEEP sends, oldest first
+	var sleep_rep: Array = [SleepQ.new(), SleepQ.new(), SleepQ.new()]   # by SLEEP_REPEATS_MS stage
 	var accs := PackedFloat32Array()   # send priority accumulator by Ent.ai
+	# the last record sent to this peer, by Ent.ai (ls_t 0 = none since the body woke)
+	var ls_p := PackedVector3Array()
+	var ls_l := PackedVector3Array()     # its velocity as the client extrapolates it (0 without LIN)
+	var ls_q := PackedVector4Array()
+	var ls_t := PackedInt64Array()
+	var netq: Dictionary = {}            # the last netq: rtt_ms, loss, interp_ms, late, puppets, at
+	var gated := 0
+	var refreshes := 0
+	var first_sleeps := 0
 	var rest_keys: Array = []
 	var rest_i := 0
 	var seq := 0
@@ -130,7 +199,23 @@ class PeerState extends RefCounted:
 	var served_ms := 0
 	var win_start_ms := 0
 	var win_bytes := 0
+	var win_payload := 0
 	var eff_bps := 0
+	var body_bps := 0                  # body-frame bytes per second without the overhead estimate
+
+	## Grows every per-awake-index array to n (new slots: nothing sent yet).
+	func fit(n: int) -> void:
+		if accs.size() >= n and ls_t.size() >= n:
+			return
+		var old := ls_t.size()
+		accs.resize(n)
+		ls_p.resize(n)
+		ls_l.resize(n)
+		ls_q.resize(n)
+		ls_t.resize(n)
+		for i in range(old, n):
+			accs[i] = 0.0
+			ls_t[i] = 0
 
 
 var bodies = null                 # the module (session, api, adapter, meta_sync, signals)
@@ -152,7 +237,7 @@ var _fb: Array = []
 var _dp: Array = []
 var _hid: Array = []
 var _meta_out: Dictionary = {}    # eid -> {kind: changed}
-var _meta_hot: Dictionary = {}    # eid -> until ms (recently spawned / boosted / dirty: polled every frame)
+var _meta_hot: Dictionary = {}    # eid -> until ms (recently spawned / boosted / dirty: polled every send tick)
 var _fixture_eids: Dictionary = {}   # state-only fixtures (always polled at their adapters' rates)
 var _last_flush_ms := 0
 var _last_send_ms := 0
@@ -164,21 +249,40 @@ var _peer_rr := 0
 var _odd_tick := false
 var _host_scale := 1.0
 var _self_usec := 0.0              # EWMA of this replicator's physics_step time
-# per-tick shared candidate cache (_send_tick)
+var _phys_load := 0.0              # the last physics load the overload guard saw (own time left out)
+var _last_meta_ms := 0
+var _followers: Dictionary = {}    # eid -> true: bodies following a client's held stream
+var _watch: Dictionary = {}        # eid -> true: net-rested bodies Jolt still has awake / kinematic
+var _bytes_for_args := -1          # Budget.bytes_for's parameter count (4 = takes the peer count)
+var _cand_rr := 0                  # overload: start of this tick's window over the other candidates
+var _last_gauge_ms := 0
+# per-tick shared candidate cache (_sample_build)
 var _c_ents: Array = []
 var _c_ai := PackedInt32Array()
 var _c_p := PackedVector3Array()
+var _c_l := PackedVector3Array()      # velocity as encoded (0 without LIN)
+var _c_q := PackedVector4Array()
 var _c_own := PackedInt32Array()      # the owning peer while held / equipped, else 0
 var _c_snap := PackedByteArray()      # 1 = some peer still owes a SNAP record
+var _c_force := PackedByteArray()     # 1 = boosted: bypasses the change gate
+var _c_skip := PackedByteArray()      # 1 = shed this tick (overload)
 var _ai_free: Array = []
 var _ai_next := 0
 var _c_w := PackedFloat32Array()
 var _c_size := PackedInt32Array()
 var _c_rec: Array = []
 var _c_sleep: Dictionary = {}       # eid -> encoded SLEEP record of this tick
+# awake breakdown of the last sample pass
+var _n_hidden := 0
+var _n_kinematic := 0
+var _n_follow := 0
+var _n_moving := 0
 var counters := {"tracked": 0, "untracked": 0, "records_tx": 0, "bytes_tx": 0, "packets_tx": 0, "ents_msgs": 0,
 	"meta_msgs": 0, "sel_overrun": 0, "snaps": 0, "overload_events": 0, "follow_pushes": 0, "releases": 0,
-	"sleep_capped": 0, "rest_rot_moves": 0}
+	"sleep_capped": 0, "rest_rot_moves": 0, "net_rests": 0, "net_rest_wakes": 0, "gated": 0, "refreshes": 0,
+	"first_sleeps": 0, "cand_shed": 0, "n_candidates": 0, "awake_hidden": 0, "awake_kinematic": 0,
+	"awake_follow": 0, "awake_moving": 0, "net_rest_watch": 0, "sleep_backlog": 0, "sleep_oldest_ms": 0,
+	"physics_load_pct": 0, "self_us": 0}
 
 
 func _init(p_bodies = null, p_pool_ids: Array = [], p_detail: String = "normal") -> void:
@@ -282,8 +386,9 @@ func untrack(eid: int) -> void:
 	_meta_out.erase(eid)
 	_meta_hot.erase(eid)
 	_fixture_eids.erase(eid)
-	for p in peers:
-		peers[p].sleep_sched.erase(eid)
+	_followers.erase(eid)
+	_watch.erase(eid)
+	_unschedule(eid)
 	tombs[eid] = _now() + TOMBSTONE_MS
 	if e.body:
 		_dp.append(eid)
@@ -311,6 +416,11 @@ func clear() -> void:
 	tombs.clear()
 	_meta_hot.clear()
 	_fixture_eids.clear()
+	_followers.clear()
+	_watch.clear()
+	if overload < 1.0:
+		overload = 1.0
+		_limit_steps(false)
 	_sp.clear()
 	_fb.clear()
 	_dp.clear()
@@ -321,6 +431,9 @@ func clear() -> void:
 func _on_sleep_changed(eid: int) -> void:
 	var e: Ent = ents.get(eid, null)
 	if e == null:
+		return
+	# a net-rested body Jolt wakes / puts to sleep: the watch decides by its pose
+	if _watch.has(eid):
 		return
 	var n := e.node()
 	if n != null and not _is_resting(n):
@@ -340,8 +453,30 @@ func _wake(e: Ent) -> void:
 	_ai_alloc(e)
 	e.resting = false
 	e.moved_ms = _now()
+	e.still_since = -1
+	if _watch.has(e.eid):
+		_watch.erase(e.eid)
+		counters.net_rest_wakes += 1
+	_unschedule(e.eid)
+
+
+## Drops the body's outstanding SLEEP sends for every peer (its FIFO entries go stale).
+func _unschedule(eid: int) -> void:
 	for p in peers:
-		peers[p].sleep_sched.erase(e.eid)
+		peers[p].sleep_pending.erase(eid)
+
+
+## Queues the first SLEEP send (and so its repeats) of a resting body for every peer.
+func _schedule_sleep(e: Ent) -> void:
+	var now := _now()
+	for p in peers:
+		_schedule_sleep_peer(peers[p], e.eid, now)
+
+
+func _schedule_sleep_peer(ps: PeerState, eid: int, now: int) -> void:
+	ps.sleep_tok = (ps.sleep_tok + 1) & 0x7FFFFFFF
+	ps.sleep_pending[eid] = ps.sleep_tok
+	ps.sleep_first.push(eid, ps.sleep_tok, now)
 
 
 ## Frame records must stay inside the codec range: one record beyond +-8000 m
@@ -360,7 +495,9 @@ static func _is_resting(n: Node) -> bool:
 		if rb.freeze and rb.freeze_mode == RigidBody3D.FREEZE_MODE_STATIC:
 			return true
 		if rb.freeze:
-			return false      # kinematic (carried, piston rider, follower): moving
+			# kinematic (carried, piston rider, follower): moving, unless it is stored
+			# out of sight (cannon barrel, vacuum bag) or out of the tree
+			return not rb.is_inside_tree() or _is_hidden(rb)
 		return rb.sleeping
 	return true
 
@@ -448,6 +585,7 @@ func follow(eid: int, peer: int) -> void:
 	e.follow_peer = peer
 	e.follow.clear()
 	e.follow_has = false
+	_followers[eid] = true
 	_wake(e)
 
 
@@ -479,6 +617,7 @@ func release(eid: int, state: Dictionary) -> void:
 	var was_following := e.follow_peer != 0
 	e.follow_peer = 0
 	e.follow.clear()
+	_followers.erase(eid)
 	if n == null:
 		return
 	if state.is_empty():
@@ -546,17 +685,17 @@ func peer_ready(peer: int) -> void:
 	ps.ready_ms = _now()
 	# bodies that came to rest after (or just before) the peer's world-snapshot
 	# cut get their SLEEP sends; everything awake starts with a full accumulator
+	var now := _now()
+	ps.fit(_ai_next)
 	for eid in ents:
 		var e: Ent = ents[eid]
 		if not e.body:
 			continue
-		if e.resting and e.moved_ms >= _now() - READY_RESEND_MS:
-			ps.sleep_sched[eid] = {"t0": _now(), "n": 0}
+		if e.resting and e.moved_ms >= now - READY_RESEND_MS:
+			_schedule_sleep_peer(ps, eid, now)
 		elif not e.resting and e.ai >= 0:
-			if ps.accs.size() < _ai_next:
-				ps.accs.resize(_ai_next)
 			ps.accs[e.ai] = 100.0
-	ps.sleep_next_ms = 0
+			ps.ls_t[e.ai] = 0
 
 
 func peer_left(peer: int) -> void:
@@ -567,10 +706,21 @@ func peer_left(peer: int) -> void:
 
 func on_netq(peer: int, msg: Dictionary) -> void:
 	var ps := _peer(peer)
-	var rx := maxi(0, int(msg.get("rx_pkts", 0)))
-	var gaps := maxi(0, int(msg.get("gaps", 0)))
+	var rx := maxi(0, _num(msg.get("rx_pkts", 0), 0))
+	var gaps := maxi(0, _num(msg.get("gaps", 0), 0))
 	var loss := float(gaps) / float(rx + gaps) if rx + gaps > 0 else 0.0
-	ps.budget.report(_now(), loss, int(msg.get("rtt_ms", -1)))
+	var rtt := _num(msg.get("rtt_ms", -1), -1)
+	ps.netq = {"rtt_ms": rtt, "loss": loss, "interp_ms": _num(msg.get("interp_ms", -1), -1),
+		"late": _num(msg.get("late", -1), -1), "puppets": _num(msg.get("puppets", -1), -1), "at": _now()}
+	ps.budget.report(_now(), loss, rtt)
+
+
+## A number from the wire (a peer's JSON) or a budget field, else `def` (never int(null)).
+static func _num(v, def: int) -> int:
+	if typeof(v) == TYPE_INT or typeof(v) == TYPE_FLOAT or typeof(v) == TYPE_BOOL:
+		var f := float(v)
+		return int(clampf(f, -2147483648.0, 2147483647.0)) if is_finite(f) else def
+	return def
 
 
 func _peer(peer: int) -> PeerState:
@@ -584,8 +734,7 @@ func _peer(peer: int) -> PeerState:
 		ps.served_ms = _now() - SEND_INTERVAL_MS
 		ps.win_start_ms = _now()
 		peers[peer] = ps
-		ps.accs.resize(_ai_next)
-		ps.accs.fill(0.0)
+		ps.fit(_ai_next)
 	return ps
 
 
@@ -600,9 +749,9 @@ func _ai_alloc(e: Ent) -> void:
 		_ai_next += 1
 	for p in peers:
 		var ps: PeerState = peers[p]
-		if ps.accs.size() < _ai_next:
-			ps.accs.resize(_ai_next)
+		ps.fit(_ai_next)
 		ps.accs[e.ai] = 0.0
+		ps.ls_t[e.ai] = 0       # a reused slot: nothing of this body was sent yet
 
 
 func _ai_release(e: Ent) -> void:
@@ -641,14 +790,18 @@ func _physics_step() -> void:
 	if absf(_fclock - float(now)) > 100.0:
 		_fclock = float(now)
 	_drive_followers(int(_fclock))
-	_poll_meta(now)
+	# meta at the send cadence (P10): readers run at 15 Hz or slower, a dirty mark waits
+	# at most one tick, and the poll stays just before the lifecycle flush
+	if now - _last_meta_ms >= SEND_INTERVAL_MS:
+		_last_meta_ms = now
+		_poll_meta(now)
 	if now - _last_flush_ms >= LIFECYCLE_MS:
 		_last_flush_ms = now
 		flush_lifecycle()
 	if not frozen and now - _last_send_ms >= SEND_INTERVAL_MS:
 		_last_send_ms = now
-		_sample_awake()
 		_scan_resting()
+		_watch_net_rest()
 		_send_tick(now)
 	if not tombs.is_empty() and Engine.get_physics_frames() % 60 == 0:
 		for eid in tombs.keys():
@@ -663,7 +816,9 @@ func _follow_now() -> int:
 
 
 func _drive_followers(now: int) -> void:
-	for eid in awake:
+	for eid in _followers:
+		if not awake.has(eid):
+			continue
 		var e: Ent = ents.get(eid, null)
 		if e == null or e.follow_peer == 0 or e.follow.is_empty() or e.owner_kind == "equipped":
 			continue
@@ -708,10 +863,33 @@ func _drive_followers(now: int) -> void:
 		n.global_transform = Transform3D(Basis(q).scaled(n.global_basis.get_scale()), e.follow_out)
 
 
-func _sample_awake() -> void:
+## One pass over the awake set per send tick (P10: sampling and the shared candidate
+## build merged): samples each body, moves resting / net-resting ones to rest (after
+## the loop) and, with `build`, fills the per-tick candidate cache with the
+## peer-independent weight, record size and pose.
+func _sample_build(now: int, build: bool) -> void:
 	var gone: Array = []
 	var rest: Array = []
-	var now := _now()
+	var net: Array = []
+	_c_ents.clear()
+	_c_rec.clear()
+	_c_sleep.clear()
+	var c := 0
+	var m := awake.size() if build else 0
+	_c_w.resize(m)
+	_c_size.resize(m)
+	_c_ai.resize(m)
+	_c_p.resize(m)
+	_c_l.resize(m)
+	_c_q.resize(m)
+	_c_own.resize(m)
+	_c_snap.resize(m)
+	_c_force.resize(m)
+	var hid := 0
+	var kin := 0
+	var fol := 0
+	var mov := 0
+	var lin_sq := LIN_MIN * LIN_MIN
 	for eid in awake:
 		var e: Ent = ents.get(eid, null)
 		if e == null:
@@ -722,24 +900,144 @@ func _sample_awake() -> void:
 			continue
 		_update_hidden(e)
 		_sample(e)
+		if e.hidden:
+			hid += 1
+		if e.follow_peer != 0:
+			fol += 1
+		if n is RigidBody3D and n.freeze:
+			kin += 1
+		if e.l.length_squared() >= lin_sq:
+			mov += 1
 		if e.follow_peer == 0 and _is_resting(n):
 			rest.append(e)
-		else:
-			e.moved_ms = now
+			continue
+		if _still_long_enough(e, now):
+			net.append(e)
+			continue
+		e.moved_ms = now
+		if not build or e.hidden or not e.body or not e.has_sample or not _in_range(e.p):
+			continue
+		if e.ai < 0:
+			_ai_alloc(e)
+		var w := e.kw * Priority.motion_w(sqrt(e.l.length_squared()))
+		var boosted := e.boost_until > now
+		if boosted:
+			w *= Priority.BOOST
+		var flags := _motion_flags(e)
+		_c_ents.append(e)
+		_c_w[c] = w
+		_c_size[c] = Codec.body_record_size(flags)
+		_c_ai[c] = e.ai
+		_c_p[c] = e.p
+		_c_l[c] = e.l if flags & Codec.RF_LIN else Vector3.ZERO
+		_c_q[c] = Vector4(e.q.x, e.q.y, e.q.z, e.q.w)
+		_c_own[c] = e.owner if e.owner_kind != "" else 0
+		_c_snap[c] = 1 if (not boosted and not e.snap_peers.is_empty()) else 0
+		_c_force[c] = 1 if boosted else 0
+		c += 1
+	_c_w.resize(c)
+	_c_size.resize(c)
+	_c_ai.resize(c)
+	_c_p.resize(c)
+	_c_l.resize(c)
+	_c_q.resize(c)
+	_c_own.resize(c)
+	_c_snap.resize(c)
+	_c_force.resize(c)
+	_c_rec.resize(c)
+	_shed_candidates(c)
+	_n_hidden = hid
+	_n_kinematic = kin
+	_n_follow = fol
+	_n_moving = mov
 	for eid in gone:
 		awake.erase(eid)
 	for e in rest:
-		_to_rest(e)
+		_to_rest(e, false)
+	for e in net:
+		_to_rest(e, true)
 
 
-func _to_rest(e: Ent) -> void:
+## Net-rest (P4): true once a body nobody holds or follows has kept its pose (within
+## STILL_M / STILL_ROT_DOT of where it stopped) for NET_REST_MS.
+func _still_long_enough(e: Ent, now: int) -> bool:
+	if e.follow_peer != 0 or e.owner_kind != "" or not e.has_sample:
+		e.still_since = -1
+		return false
+	if e.still_since < 0 or e.p.distance_squared_to(e.still_p) > STILL_M * STILL_M \
+			or absf(e.q.dot(e.still_q)) < STILL_ROT_DOT:
+		e.still_since = now
+		e.still_p = e.p
+		e.still_q = e.q
+		return false
+	return now - e.still_since >= NET_REST_MS
+
+
+## Overload (P11): at most OVERLOAD_CANDIDATES candidates take part this tick. Held,
+## SNAP-owing and boosted ones always do; the others in turn (a window that moves on
+## every tick), so every accumulator still grows.
+func _shed_candidates(c: int) -> void:
+	_c_skip.resize(c)
+	_c_skip.fill(0)
+	if overload >= 1.0 or c <= OVERLOAD_CANDIDATES:
+		return
+	var others := 0
+	for i in c:
+		if _c_own[i] == 0 and _c_snap[i] == 0 and _c_force[i] == 0:
+			others += 1
+	var keep := maxi(0, OVERLOAD_CANDIDATES - (c - others))
+	if others <= keep:
+		return
+	var start := _cand_rr % others
+	var k := 0
+	for i in c:
+		if _c_own[i] != 0 or _c_snap[i] != 0 or _c_force[i] != 0:
+			continue
+		if posmod(k - start, others) >= keep:
+			_c_skip[i] = 1
+			counters.cand_shed += 1
+		k += 1
+	_cand_rr = (start + keep) % others
+
+
+func _to_rest(e: Ent, net: bool) -> void:
 	awake.erase(e.eid)
 	e.resting = true
+	e.still_since = -1
 	_ai_release(e)
-	for p in peers:
-		var ps: PeerState = peers[p]
-		ps.sleep_sched[e.eid] = {"t0": _now(), "n": 0}
-		ps.sleep_next_ms = 0
+	_schedule_sleep(e)
+	if net:
+		counters.net_rests += 1
+		var n := e.node()
+		# Jolt still has it awake (or it is a still kinematic body): watch its pose
+		if n != null and not _is_resting(n):
+			_watch[e.eid] = true
+
+
+## Net-rested bodies Jolt has not put to sleep, every send tick: one that moved or
+## turned wakes; one that sleeps for real, hid or left the tree leaves the watch
+## (the sleep signal, the visibility signal and the rest scan cover it then).
+func _watch_net_rest() -> void:
+	if _watch.is_empty():
+		return
+	var drop: Array = []
+	var wake: Array = []
+	for eid in _watch:
+		var e: Ent = ents.get(eid, null)
+		if e == null or not e.resting or awake.has(eid):
+			drop.append(eid)
+			continue
+		var n := e.node()
+		if n == null or not n.is_inside_tree() or e.hidden or _is_hidden(n) or _is_resting(n):
+			drop.append(eid)
+			continue
+		if n.global_position.distance_squared_to(e.p) > WATCH_M * WATCH_M \
+				or absf(n.global_basis.get_rotation_quaternion().dot(e.q)) < REST_ROT_DOT:
+			wake.append(e)
+	for eid in drop:
+		_watch.erase(eid)
+	for e in wake:
+		_wake(e)
 
 
 ## Resting bodies, round-robin: woken without a signal (unfrozen, moved by code)?
@@ -753,17 +1051,25 @@ func _scan_resting() -> void:
 		var eid = _rest_scan_keys[_rest_scan_i]
 		_rest_scan_i += 1
 		var e: Ent = ents.get(eid, null)
-		if e == null or not e.body or awake.has(eid):
+		if e == null or not e.body or awake.has(eid) or _watch.has(eid):
 			continue
 		n_done += 1
 		var n := e.node()
 		if n == null:
 			continue
 		_update_hidden(e)
+		if awake.has(eid) or not n.is_inside_tree():
+			continue
+		var moved := n.global_position.distance_to(e.p) > 0.01 \
+				or absf(n.global_basis.get_rotation_quaternion().dot(e.q)) < REST_ROT_DOT
 		if not _is_resting(n):
-			_wake(e)
-		elif n.global_position.distance_to(e.p) > 0.01 \
-				or absf(n.global_basis.get_rotation_quaternion().dot(e.q)) < REST_ROT_DOT:
+			# P4: a still body Jolt keeps awake (or a still kinematic one) is not woken for
+			# that alone; it joins the watch, which wakes it once it moves
+			if not moved and e.follow_peer == 0 and e.owner_kind == "":
+				_watch[eid] = true
+			else:
+				_wake(e)
+		elif moved:
 			# moved (or turned in place) by game code while resting (a teleport, a placement)
 			var jumped := n.global_position.distance_to(e.p) > 1.0
 			if n.global_position.distance_to(e.p) <= 0.01:
@@ -772,25 +1078,25 @@ func _scan_resting() -> void:
 			if jumped:
 				_mark_snap(e)
 			e.moved_ms = _now()
-			for p in peers:
-				peers[p].sleep_sched[eid] = {"t0": _now(), "n": 0}
-				peers[p].sleep_next_ms = 0
+			_schedule_sleep(e)
 
 
 func _send_tick(now: int) -> void:
 	var s = _session()
-	if s == null:
-		return
-	var in_game: Array = s.in_game_peers()
+	var in_game: Array = s.in_game_peers() if s != null else []
 	for p in peers.keys():
 		if not (p in in_game):
 			peers.erase(p)
+	if not in_game.is_empty():
+		_overload_check(now)
+	# sampling (and the rest / net-rest moves) runs with or without a peer in game
+	_sample_build(now, not in_game.is_empty())
+	_update_gauges(now)
 	if in_game.is_empty():
+		_c_ents.clear()
 		return
-	_overload_check(now)
 	_odd_tick = not _odd_tick
 	var t0 := Time.get_ticks_usec()
-	_build_shared(now)
 	_update_host_scale()
 	var n := in_game.size()
 	for i in n:
@@ -799,7 +1105,7 @@ func _send_tick(now: int) -> void:
 		# overloaded: every peer every other tick (its banked budget keeps its byte rate)
 		if overload < 1.0 and n > 1 and ((ps.slot % 2 == 0) == _odd_tick) and now - ps.served_ms < 2 * SEND_INTERVAL_MS:
 			continue
-		_send_peer(ps, now)
+		_send_peer(ps, now, n)
 		if Time.get_ticks_usec() - t0 > SEL_BUDGET_USEC and i < n - 1:
 			counters.sel_overrun += 1
 			_peer_rr = (_peer_rr + i + 1) % n
@@ -811,44 +1117,9 @@ func _send_tick(now: int) -> void:
 	_c_sleep.clear()
 
 
-## Once per tick: the awake candidates with their peer-independent weight and size.
+## The shared candidate cache of this tick without sending (tests, tools).
 func _build_shared(now: int) -> void:
-	_c_ents.clear()
-	_c_rec.clear()
-	_c_sleep.clear()
-	var n := 0
-	var m := awake.size()
-	_c_w.resize(m)
-	_c_size.resize(m)
-	_c_ai.resize(m)
-	_c_p.resize(m)
-	_c_own.resize(m)
-	_c_snap.resize(m)
-	for eid in awake:
-		var e: Ent = ents.get(eid, null)
-		if e == null or e.hidden or not e.body or not e.has_sample or not _in_range(e.p):
-			continue
-		if e.ai < 0:
-			_ai_alloc(e)
-		var w := e.kw * Priority.motion_w(e.l.length())
-		var boosted := e.boost_until > now
-		if boosted:
-			w *= Priority.BOOST
-		_c_ents.append(e)
-		_c_w[n] = w
-		_c_size[n] = Codec.body_record_size(_motion_flags(e))
-		_c_ai[n] = e.ai
-		_c_p[n] = e.p
-		_c_own[n] = e.owner if e.owner_kind != "" else 0
-		_c_snap[n] = 1 if (not boosted and not e.snap_peers.is_empty()) else 0
-		n += 1
-	_c_w.resize(n)
-	_c_size.resize(n)
-	_c_ai.resize(n)
-	_c_p.resize(n)
-	_c_own.resize(n)
-	_c_snap.resize(n)
-	_c_rec.resize(n)
+	_sample_build(now, true)
 
 
 ## HOST_UPLOAD_BPS over the sum of the peers' budgets (1.0 = no cap).
@@ -888,14 +1159,27 @@ func _snap_patch(b: PackedByteArray, e: Ent, peer: int) -> PackedByteArray:
 	return c
 
 
-func _send_peer(ps: PeerState, now: int) -> void:
+## This tick's bytes for a peer. The budget stream's bytes_for may take the in-game
+## peer count as a 4th parameter (P11: the overload halving only helps with two or
+## more peers); either way a lone peer's bytes are never halved for host CPU.
+func _budget_bytes(ps: PeerState, seconds: float, n_peers: int) -> int:
+	var b = ps.budget
+	if _bytes_for_args < 0:
+		_bytes_for_args = b.get_method_argument_count("bytes_for") if b.has_method("bytes_for") else 3
+	var ov := overload if n_peers > 1 else 1.0
+	if _bytes_for_args >= 4:
+		return int(b.bytes_for(seconds, ov, _host_scale, n_peers))
+	return int(b.bytes_for(seconds, ov, _host_scale))
+
+
+func _send_peer(ps: PeerState, now: int, n_peers: int = 1) -> void:
 	var s = _session()
 	var elapsed_ms := clampi(now - ps.served_ms, SEND_INTERVAL_MS, SEND_INTERVAL_MS * BANK_MAX_TICKS)
 	ps.served_ms = now
 	var dt := clampf(float(now - ps.last_tick_ms) / 1000.0, 0.0, 0.25)
 	ps.last_tick_ms = now
 	ps.budget.tick(now)
-	var budget: int = ps.budget.bytes_for(float(elapsed_ms) / 1000.0, overload, _host_scale)
+	var budget := _budget_bytes(ps, float(elapsed_ms) / 1000.0, n_peers)
 	# every packet's header and transport overhead come out of the budget
 	var per_pkt := Codec.BODIES_HEADER + PKT_OVERHEAD
 	var n_pkts := maxi(1, ceili(float(budget) / float(Codec.PACK_TARGET)))
@@ -907,36 +1191,64 @@ func _send_peer(ps: PeerState, now: int) -> void:
 	var used := 0
 	var peer := ps.peer
 	var n_c := _c_ents.size()
-	# 1. due SLEEP sends (first send and its 3 repeats), at most SLEEP_SHARE of the tick
-	#    while bodies are awake
-	if not ps.sleep_sched.is_empty() and now >= ps.sleep_next_ms:
-		var cap := room if n_c == 0 else int(room * SLEEP_SHARE)
-		var next_due := now + 1000000
-		var capped := false
-		for eid in ps.sleep_sched.keys():
-			var sc: Dictionary = ps.sleep_sched[eid]
-			var due := int(sc.t0) + (0 if int(sc.n) == 0 else int(SLEEP_REPEATS_MS[int(sc.n) - 1]))
-			if now < due or capped:
-				next_due = mini(next_due, due)
-				continue
-			var e: Ent = ents.get(eid, null)
-			if e == null or e.hidden or not _in_range(e.p) or (e.owner == peer and e.owner_kind != ""):
-				ps.sleep_sched.erase(eid)
-				continue
-			if used + Codec.BODY_BASE > cap and not recs.is_empty():
-				capped = true
-				counters.sleep_capped += 1
-				next_due = now
-				continue
-			recs.append(_sleep_bytes(e, peer))
-			used += Codec.BODY_BASE
-			sc.n = int(sc.n) + 1
-			if int(sc.n) > SLEEP_REPEATS_MS.size():
-				ps.sleep_sched.erase(eid)
-			else:
-				next_due = mini(next_due, int(sc.t0) + int(SLEEP_REPEATS_MS[int(sc.n) - 1]))
-		ps.sleep_next_ms = next_due
-	# 2. awake bodies by accumulated priority (shared weight x this peer's distance weight)
+	# 1. SLEEP sends before the awake records (P7). First sends, oldest first, up to
+	#    FIRST_SHARE of the tick; then the due repeats (250 ms / 1 s / 3 s stages) up to
+	#    SLEEP_SHARE, after the first sends. With nothing awake they may fill the tick.
+	var first_cap := room if n_c == 0 else int(room * FIRST_SHARE)
+	var rep_cap := room if n_c == 0 else mini(first_cap, int(room * SLEEP_SHARE))
+	var capped := false
+	var q: SleepQ = ps.sleep_first
+	while q.size() > 0:
+		var eid := q.eid[q.head]
+		var tok := q.tok[q.head]
+		if int(ps.sleep_pending.get(eid, -1)) != tok:
+			q.pop()
+			continue
+		var e: Ent = ents.get(eid, null)
+		if e == null or e.hidden or not _in_range(e.p) or (e.owner == peer and e.owner_kind != ""):
+			ps.sleep_pending.erase(eid)
+			q.pop()
+			continue
+		if used + Codec.BODY_BASE > first_cap and not recs.is_empty():
+			capped = true
+			break
+		recs.append(_sleep_bytes(e, peer))
+		used += Codec.BODY_BASE
+		q.pop()
+		ps.first_sleeps += 1
+		counters.first_sleeps += 1
+		(ps.sleep_rep[0] as SleepQ).push(eid, tok, now + int(SLEEP_REPEATS_MS[0]))
+	var stage := 0
+	while not capped and stage < SLEEP_REPEATS_MS.size():
+		var rq: SleepQ = ps.sleep_rep[stage]
+		if rq.size() == 0 or rq.t[rq.head] > now:
+			stage += 1
+			continue
+		var eid := rq.eid[rq.head]
+		var tok := rq.tok[rq.head]
+		if int(ps.sleep_pending.get(eid, -1)) != tok:
+			rq.pop()
+			continue
+		var e: Ent = ents.get(eid, null)
+		if e == null or e.hidden or not _in_range(e.p) or (e.owner == peer and e.owner_kind != ""):
+			ps.sleep_pending.erase(eid)
+			rq.pop()
+			continue
+		if used + Codec.BODY_BASE > rep_cap and not recs.is_empty():
+			capped = true
+			break
+		recs.append(_sleep_bytes(e, peer))
+		used += Codec.BODY_BASE
+		rq.pop()
+		if stage + 1 < SLEEP_REPEATS_MS.size():
+			var gap := int(SLEEP_REPEATS_MS[stage + 1]) - int(SLEEP_REPEATS_MS[stage])
+			(ps.sleep_rep[stage + 1] as SleepQ).push(eid, tok, now + gap)
+		else:
+			ps.sleep_pending.erase(eid)
+	if capped:
+		counters.sleep_capped += 1
+	# 2. awake bodies by accumulated priority: shared weight x this peer's distance
+	#    weight x the change weight against what this peer was sent last (P4)
 	if n_c > 0:
 		var accs := PackedFloat32Array()
 		accs.resize(n_c)
@@ -944,19 +1256,38 @@ func _send_peer(ps: PeerState, now: int) -> void:
 		idx.resize(n_c)
 		var k := 0
 		var inv := 1.0 / (Priority.DIST_SCALE * Priority.DIST_SCALE)
+		ps.fit(_ai_next)
 		var store := ps.accs
-		if store.size() < _ai_next:
-			store.resize(_ai_next)
+		var ls_t := ps.ls_t
+		var ls_p := ps.ls_p
+		var ls_l := ps.ls_l
+		var ls_q := ps.ls_q
 		var floor_w := Priority.DIST_FLOOR
+		var gated := 0
+		var refreshes := 0
 		for i in n_c:
-			if _c_own[i] == peer:
+			if _c_own[i] == peer or _c_skip[i] != 0:
 				continue
 			var w: float = _c_w[i]
-			if has_pose:
-				w *= maxf(floor_w, 1.0 / (1.0 + _c_p[i].distance_squared_to(a_c) * inv))
+			var force := _c_force[i] != 0
 			if _c_snap[i] != 0 and (_c_ents[i] as Ent).snap_peers.has(peer):
 				w *= Priority.BOOST
+				force = true
 			var ai := _c_ai[i]
+			var lt := ls_t[ai]
+			if not force and lt != 0:
+				var age := now - lt
+				if age < REFRESH_MS:
+					var pe: Vector3 = ls_p[ai] + ls_l[ai] * (float(mini(age, EXTRAP_MS)) / 1000.0)
+					var cw := Priority.change_w(pe.distance_to(_c_p[i]), absf(ls_q[ai].dot(_c_q[i])))
+					if cw <= 0.0:
+						gated += 1
+						continue
+					w *= cw
+				else:
+					refreshes += 1
+			if has_pose:
+				w *= maxf(floor_w, 1.0 / (1.0 + _c_p[i].distance_squared_to(a_c) * inv))
 			var acc: float = store[ai] + w * dt
 			store[ai] = acc
 			accs[k] = acc
@@ -967,8 +1298,21 @@ func _send_peer(ps: PeerState, now: int) -> void:
 		for j in Priority.select_top(accs, idx, _c_size, room - used):
 			recs.append(_rec_bytes(j, peer))
 			used += _c_size[j]
-			store[_c_ai[j]] = 0.0
+			var aj := _c_ai[j]
+			store[aj] = 0.0
+			ls_t[aj] = now
+			ls_p[aj] = _c_p[j]
+			ls_l[aj] = _c_l[j]
+			ls_q[aj] = _c_q[j]
 		ps.accs = store
+		ps.ls_t = ls_t
+		ps.ls_p = ls_p
+		ps.ls_l = ls_l
+		ps.ls_q = ls_q
+		ps.gated += gated
+		ps.refreshes += refreshes
+		counters.gated += gated
+		counters.refreshes += refreshes
 	# 3. rest refresh: one resting body per tick heals any lost SLEEP record
 	if ps.rest_i >= ps.rest_keys.size():
 		ps.rest_keys = ents.keys()
@@ -977,13 +1321,14 @@ func _send_peer(ps: PeerState, now: int) -> void:
 		var eid = ps.rest_keys[ps.rest_i]
 		ps.rest_i += 1
 		var e: Ent = ents.get(eid, null)
-		if e == null or not e.body or not e.resting or e.hidden or ps.sleep_sched.has(eid) or not _in_range(e.p):
+		if e == null or not e.body or not e.resting or e.hidden or ps.sleep_pending.has(eid) or not _in_range(e.p):
 			continue
 		if e.owner == peer and e.owner_kind != "":
 			continue
 		recs.append(_sleep_bytes(e, peer))
 		break
 	if recs.is_empty():
+		_roll_window(ps, now)
 		return
 	var pkts := Codec.pack_records(s.host_now(), ps.seq, recs)
 	ps.seq = (ps.seq + pkts.size()) & 0xFFFF
@@ -998,15 +1343,28 @@ func _send_peer(ps: PeerState, now: int) -> void:
 	ps.tx_records += recs.size()
 	counters.records_tx += recs.size()
 	ps.win_bytes += bytes + pkts.size() * PKT_OVERHEAD
+	ps.win_payload += bytes
+	_roll_window(ps, now)
+
+
+## eff_bps (with the overhead estimate) and body_bps (body-frame bytes only) of the
+## last complete second; a tick that sends nothing still closes the window.
+func _roll_window(ps: PeerState, now: int) -> void:
 	if now - ps.win_start_ms >= 1000:
 		ps.eff_bps = int(float(ps.win_bytes) * 1000.0 / float(now - ps.win_start_ms))
+		ps.body_bps = int(float(ps.win_payload) * 1000.0 / float(now - ps.win_start_ms))
 		ps.win_bytes = 0
+		ps.win_payload = 0
 		ps.win_start_ms = now
 
 
+## LIN only at LIN_MIN or faster (P4): a body crawling or sitting still is sent in
+## 19 B and the client holds it instead of extrapolating a stale crawl.
 func _motion_flags(e: Ent) -> int:
-	var f := Codec.RF_LIN
-	if e.a.length_squared() > 0.0025:
+	var f := 0
+	if e.l.length_squared() >= LIN_MIN * LIN_MIN:
+		f |= Codec.RF_LIN
+	if e.a.length_squared() > ANG_MIN_SQ:
 		f |= Codec.RF_ANG
 	return f
 
@@ -1028,6 +1386,7 @@ func _overload_check(now: int) -> void:
 	var ratio: float = bodies.adapter.physics_load() if bodies.adapter != null and bodies.adapter.has_method("physics_load") else 0.0
 	# the replicator's own time is inside TIME_PHYSICS_PROCESS: leave it out
 	ratio = maxf(0.0, ratio - _self_usec / 1000000.0 * float(maxi(1, Engine.physics_ticks_per_second)))
+	_phys_load = ratio
 	if ratio > OVERLOAD_RATIO:
 		_calm_since = -1
 		if _overload_since < 0:
@@ -1035,6 +1394,7 @@ func _overload_check(now: int) -> void:
 		if overload >= 1.0 and now - _overload_since >= OVERLOAD_HOLD_MS:
 			overload = 0.5
 			counters.overload_events += 1
+			_limit_steps(true)
 			if now - _overload_toast_ms >= OVERLOAD_TOAST_MS:
 				_overload_toast_ms = now
 				bodies.toast("MP_PHYSICS_OVERLOADED")
@@ -1044,6 +1404,14 @@ func _overload_check(now: int) -> void:
 			_calm_since = now
 		if overload < 1.0 and now - _calm_since >= OVERLOAD_HOLD_MS:
 			overload = 1.0
+			_limit_steps(false)
+
+
+## P11: fewer physics catch-up steps per frame while overloaded (BodiesAdapter).
+func _limit_steps(on: bool) -> void:
+	var ad = bodies.adapter if bodies != null else null
+	if ad != null and ad.has_method("limit_physics_steps"):
+		ad.limit_physics_steps(on)
 
 
 # ================================================================== meta
@@ -1218,7 +1586,78 @@ func stats() -> Dictionary:
 	var per := {}
 	for p in peers:
 		var ps: PeerState = peers[p]
-		per[p] = {"budget_bps": ps.budget.bps, "eff_bps": ps.eff_bps, "records": ps.tx_records, "bytes": ps.tx_bytes,
-			"packets": ps.tx_packets}
+		var d := peer_budget_info(p)
+		d["budget_bps"] = d.bps
+		d["records"] = ps.tx_records
+		d["bytes"] = ps.tx_bytes
+		d["packets"] = ps.tx_packets
+		per[p] = d
 	return {"tracked": ents.size(), "awake": awake.size(), "peers": per, "overload": overload,
-		"host_scale": _host_scale, "self_us": int(_self_usec)}
+		"host_scale": _host_scale, "self_us": int(_self_usec), "physics_load": snappedf(_phys_load, 0.001),
+		"n_candidates": _c_ents.size(), "awake_hidden": _n_hidden, "awake_kinematic": _n_kinematic,
+		"awake_follow": _n_follow, "awake_moving": _n_moving, "followers": _followers.size(),
+		"net_rest_watch": _watch.size(), "physics_steps_limited": _steps_limited()}
+
+
+## P1: one peer's sender state for the stats line and the session dump: its budget
+## (read with get(), so a budget without a field reads -1), the measured rates, the
+## last netq it sent, the host's load, the candidate / awake breakdown of the last
+## tick and its SLEEP backlog. {} for a peer the replicator does not know.
+func peer_budget_info(peer: int) -> Dictionary:
+	var ps: PeerState = peers.get(peer, null)
+	if ps == null:
+		return {}
+	var b = ps.budget
+	var q := ps.netq
+	var oldest := 0
+	if ps.sleep_first.size() > 0:
+		oldest = maxi(0, _now() - int(ps.sleep_first.t[ps.sleep_first.head]))
+	return {"bps": _num(b.get("bps"), -1), "eff_bps": ps.eff_bps, "downs": _num(b.get("downs"), -1),
+		"ups": _num(b.get("ups"), -1), "min_rtt": _num(b.get("min_rtt"), -1),
+		"configured": _num(b.get("configured"), -1), "overload": overload,
+		"physics_load": snappedf(_phys_load, 0.001), "self_us": int(_self_usec), "n_candidates": _c_ents.size(),
+		"awake": awake.size(), "awake_hidden": _n_hidden, "awake_kinematic": _n_kinematic,
+		"awake_follow": _n_follow, "awake_moving": _n_moving,
+		"sleep_backlog": ps.sleep_pending.size(), "sleep_first_queued": ps.sleep_first.size(),
+		"sleep_oldest_ms": oldest,
+		"rtt_ms": int(q.get("rtt_ms", -1)), "loss": float(q.get("loss", -1.0)),
+		"interp_ms": int(q.get("interp_ms", -1)), "late": int(q.get("late", -1)),
+		"puppets": int(q.get("puppets", -1)), "netq_age_ms": _now() - int(q.at) if q.has("at") else -1,
+		"body_bytes": ps.tx_bytes, "body_bps": ps.body_bps, "body_records": ps.tx_records,
+		"body_packets": ps.tx_packets, "gated": ps.gated, "refreshes": ps.refreshes,
+		"first_sleeps": ps.first_sleeps}
+
+
+func _steps_limited() -> bool:
+	var ad = bodies.adapter if bodies != null else null
+	return ad != null and ad.has_method("physics_steps_limited") and bool(ad.physics_steps_limited())
+
+
+## Flat gauges in counters (they reach the session dump and stats through
+## bodies.counters()), and once a second the whole stats() as counters.host_stats.
+func _update_gauges(now: int) -> void:
+	counters.n_candidates = _c_ents.size()
+	counters.awake_hidden = _n_hidden
+	counters.awake_kinematic = _n_kinematic
+	counters.awake_follow = _n_follow
+	counters.awake_moving = _n_moving
+	counters.net_rest_watch = _watch.size()
+	counters.physics_load_pct = roundi(_phys_load * 100.0)
+	counters.self_us = int(_self_usec)
+	var backlog := 0
+	var oldest := 0
+	for p in peers:
+		var ps: PeerState = peers[p]
+		backlog = maxi(backlog, ps.sleep_pending.size())
+		if ps.sleep_first.size() > 0:
+			oldest = maxi(oldest, now - int(ps.sleep_first.t[ps.sleep_first.head]))
+	counters.sleep_backlog = backlog
+	counters.sleep_oldest_ms = oldest
+	if now - _last_gauge_ms >= 1000:
+		_last_gauge_ms = now
+		counters["host_stats"] = stats()
+
+
+## The replicator's part of a session dump.
+func dump() -> Dictionary:
+	return stats()
