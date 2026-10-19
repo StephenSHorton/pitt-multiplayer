@@ -306,9 +306,17 @@ first and drops the carry.
 2 s or is still interpolating:
 - Render time `rt = host_now − interp_delay`, `interp_delay = clamp(2 × jitter + 33 ms, 66, 200)` (100 ms
   default), using the MP1 clock offset (`Session.host_now`).
-- Ring of the last 6 states per entity; Hermite position interpolation when both neighbours carry `LIN`,
-  linear otherwise; `slerp` for rotation. Extrapolation with velocity up to 250 ms, then hold.
-- `SNAP`, an error > 5 m, or an epoch change → teleport; otherwise corrections blend over 150 ms.
+- Ring of the last 6 states per entity; Hermite position interpolation when both neighbours carry `LIN`
+  and lie at most 100 ms apart, linear otherwise (a tangent scaled by a long span swings off the path);
+  `slerp` for rotation. Extrapolation with linear and angular velocity for about one update interval of
+  the body (the smaller of its last two record spacings + 50 ms, clamped to 100-600 ms; 250 ms with one
+  record), then hold. The sampled velocity is always the derivative of the sampled curve (zero in
+  before / hold / sleep).
+- `SNAP`, an error > 5 m, or an epoch change → teleport; otherwise corrections blend over 150 ms. A blend
+  starts only when new data arrives (the ring changed), from where the puppet would be drawn on the old
+  curve, for position and rotation. A running blend restarts only when the new error is larger than what is
+  left of it; a smaller one is folded in and the blend still ends on time. A still pose (before / hold /
+  sleep) is written once, not every frame.
 - It writes `global_transform` (a kinematic move, so the local player is pushed and carried; physics
   interpolation is on, project.godot:187, so rendering is smooth) and re-asserts `freeze`/`freeze_mode`.
 - `SLEEP`: place exactly and stop driving until the next record.
@@ -317,9 +325,14 @@ first and drops the carry.
 - Frames for an unknown eid wait 500 ms for the spawn, then are dropped (`orphan_frames`).
 
 **`local_sim` (GRAB, equip).** `set_local_sim(eid, true)` stops driving, sets `freeze = false` (the game's carry
-code moves the body) and removes the D22 exception. `set_local_sim(eid, false, min_epoch)` keeps the body
-local until a host record with `epoch ≥ min_epoch` arrives, then re-puppetizes and blends from the local
-pose over 150 ms; with no such record within 1 s it snaps to the latest host state.
+code moves the body), removes the D22 exception and clears the ring (the host sends nothing of a body to its
+owner, so every state in it is pre-grab and must never be drawn again). `set_local_sim(eid, false,
+min_epoch)` keeps the body local until the render time passes the first host record with
+`epoch ≥ min_epoch` (older records are dropped), then re-puppetizes. The host's copy started from the
+release state one way later and is drawn `interp_delay` behind, so the stream is drawn ahead of `rt` by the
+local pose's lead along its velocity (≤ 400 ms, fading out over 1 s: the body slows briefly instead of
+jumping back) and the rest blends over 150 ms. With no such record within 1 s any host record will do; with
+none at all within 3 s the local pose is kept (`release_kept_local`) and the next record blends from it.
 
 **Riders (0.2.2).** A body GRAB carries (local_sim, not equipped) takes the puppets in or on it along: every
 pooled puppet it touches (`get_colliding_bodies`; the game's carry turns `contact_monitor` on) or whose
@@ -629,7 +642,8 @@ The host's own player is peer 1: a host grab sets `{1, "held"}` so clients see `
   and for products `player_throw_time` (sent as age in ms) and `player_throw_position`.
 - Client → host `own_rel {eid, epoch, s, thrown, placed, panel_state?, throw_meta?}` on ch3. The client
   keeps simulating its copy dynamically, then calls `bodies.set_local_sim(eid, false, epoch + 1)`: the body
-  returns to puppet mode when the first host record with the new epoch arrives (150 ms blend).
+  returns to puppet mode once the render time passes the first host record with the new epoch (3.4
+  `local_sim`: drawn ahead by a fading lead, then a 150 ms blend).
 - **Host** on `own_rel` (owner and epoch must match, else ignored): `bodies.host_release(eid, s)` (exact
   pose and velocities, `freeze = false`, dynamic again, woken), restore throw metas (`player_throw_time =
   now − age`, so long-range feed stats count), if `placed` call `place()` in host exec (sticky tools may
@@ -869,6 +883,10 @@ within Steam relay limits.
 `mp stats`; client `netq` (gaps, late frames, interpolation delay, puppet count, strays, local money writes).
 PittMPTests asserts on these (11.2 B5, B6). Staleness metric: for bodies within 10 m of the client avatar and
 moving faster than 0.5 m/s, `now − last_update` p95 ≤ 150 ms at normal detail without conditioning.
+The client measures it live: the replicator's counters carry `cl_stale_p95_ms` / `cl_stale_n` (last 2048
+samples at 10 Hz) next to `cl_frame_p95_ms` / `cl_frame_max_ms` (last 600 rendered frames),
+`cl_physics_load`, `cl_phys_active` (`PHYSICS_3D_ACTIVE_OBJECTS`) and `cl_active`, refreshed every second
+(so `mp stats` and `dump()` see them); netq carries `frame_p95_ms`, `stale_p95_ms` and `physics_load` to the host.
 
 ---
 

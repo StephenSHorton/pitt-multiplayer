@@ -212,12 +212,13 @@ func test_owner_never_receives_its_body() -> void:
 	var me: int = c.session.my_peer_id()
 	h.grab.set_owner(eid, me, "held", 1)
 	h.bodies.host_follow(eid, me)
+	var before: int = _puppet(c, eid).ring.size()
 	c.bodies.set_local_sim(eid, true)
+	assert_eq(_puppet(c, eid).ring.size(), 0, "set_local_sim(on) drops the pre-grab states (P8)")
 	var n := _client_node(c, eid)
 	assert_false(n.freeze, "local_sim: the client simulates its copy")
 	assert_true(c.bodies.is_local_sim(eid), "is_local_sim")
 	await rig.ms(150)
-	var before: int = _puppet(c, eid).ring.size()
 	var newest_t := int(_puppet(c, eid).newest().get("t", 0))
 	for i in 10:
 		h.bodies.host_follow_push(eid, {"p": Vector3(1, 2 + i * 0.1, 0), "q": Quaternion.IDENTITY,
