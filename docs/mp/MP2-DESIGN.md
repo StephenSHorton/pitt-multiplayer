@@ -648,7 +648,7 @@ The host's own player is peer 1: a host grab sets `{1, "held"}` so clients see `
 
 | Trigger (host) | Action |
 |---|---|
-| No held frame from the owner for 1.5 s (`held`) | revoke `silence`: `host_release(eid, last_state)`, epoch+1, `own {ev:"revoke"}` to the owner. A host-originated grant (rack withdraw) gets 1 s more; a revoke of a grant that never got a held frame is also counted `grant_never_carried` |
+| No held frame from the owner for 1.5 s (`held`) | revoke `silence`: `host_release(eid, last_state)`, epoch+1, `own {ev:"revoke"}` to the owner. A host-originated grant (rack withdraw) gets 1 s more; a `silence` or `far` revoke of a grant that never got a held frame is also counted `grant_never_carried` (a `rack` store of a fresh grant, the busy client re-racking, is not) |
 | No packet of any kind from the owner for 0.5 s while its frames are silent (the link stalled, not the carry) | no revoke: the hold is frozen (the follower keeps its last state, no far check, `link_stalls`); the silence clock restarts when the link does. The Session's own 15 s peer timeout ends it as `left` |
 | Owner disconnects / leaves | revoke every eid they own; equipped tools are unequipped at the owner's last avatar pose (6.4) |
 | The body is consumed / starts a maw recycle / enters a cannon, vacuum, terminal arc, press stroke, cauldron | GAMEPLAY calls `grab.revoke(eid, reason)` (the game's own code already ran on the host) |

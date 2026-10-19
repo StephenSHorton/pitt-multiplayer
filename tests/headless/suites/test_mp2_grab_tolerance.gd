@@ -202,6 +202,21 @@ func test_carried_grant_revoke_is_not_never_carried() -> void:
 	r.cleanup()
 
 
+## The busy client sends rack_store for a fresh rack grant; rack.gd revokes it
+## "rack" before any held frame. That worked as designed: not never-carried.
+func test_rack_store_of_fresh_grant_is_not_never_carried() -> void:
+	var r := Rig.new(runner, 1)
+	r.body(DUCK)
+	var c = r.c(0)
+	r.host.bodies.nodes[1500] = r.host.nodes[DUCK]
+	r.host.grab.grant(1500, c.id, "held", true)
+	r.host.grab.revoke(1500, "rack")
+	assert_eq(r.host.grab.hold_kind(1500), "", "revoked")
+	assert_eq(r.host.grab.counters().grab_revoke_reasons, {"rack": 1}, "reason rack")
+	assert_eq(int(r.host.grab.counters().grab_grant_never_carried), 0, "not counted")
+	r.cleanup()
+
+
 ## A HELD flag from a record older than the client's GRAB row (the release `set`
 ## arrived, a stale or reordered record still says held): the row wins.
 func test_stale_held_flag_yields_to_the_row() -> void:

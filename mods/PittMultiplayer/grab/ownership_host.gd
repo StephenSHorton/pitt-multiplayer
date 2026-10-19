@@ -37,6 +37,10 @@ const GRANT_GRACE_MS := 1000
 ## already took the body) only stops the follower (host_release(eid, {})).
 const RELEASE_REASONS := ["silence", "far", "left", "ending", "host"]
 const PLACE_DELAY_FRAMES := 2
+## revoke reasons that mean the owner never took the body into its hands; a
+## rack store (the busy client re-racked the panel) or a consume of a fresh
+## grant worked as designed and is not counted grant_never_carried
+const NEVER_CARRIED_REASONS := ["silence", "far"]
 
 
 class Row extends RefCounted:
@@ -61,8 +65,8 @@ var _place_q: Array = []         # [{eid, peer, info, frames}]
 var _held_seq: Dictionary = {}   # peer -> u8 sequence of its newest held frame (header byte 1)
 ## held_early: epoch-0 frames (the owner had not seen its grant yet), accepted;
 ## held_gaps: held frames lost on the way (sequence gaps); link_stalls: holds
-## frozen because the owner's link went quiet; grant_never_carried: revokes of
-## a grant that never got one held frame
+## frozen because the owner's link went quiet; grant_never_carried: silence or
+## far revokes of a grant that never got one held frame
 var counters := {"grants": 0, "denies": 0, "revokes": 0, "releases": 0, "held_rx": 0, "held_rejected": 0,
 	"held_early": 0, "rel_ignored": 0, "equip_ignored": 0, "host_refused": 0, "own_tx": 0,
 	"rel_clamped": 0, "held_gaps": 0, "link_stalls": 0, "grant_never_carried": 0}
@@ -367,7 +371,7 @@ func revoke(eid: int, reason: String) -> void:
 		return
 	counters.revokes += 1
 	revoke_reasons[reason] = int(revoke_reasons.get(reason, 0)) + 1
-	if r.owner != HOST and r.await_ack and r.last_state.is_empty():
+	if reason in NEVER_CARRIED_REASONS and r.owner != HOST and r.await_ack and r.last_state.is_empty():
 		counters.grant_never_carried += 1
 	var prev_owner := r.owner
 	var prev_kind := r.kind
