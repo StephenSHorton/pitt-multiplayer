@@ -210,10 +210,14 @@ func test_epoch_zero_frames_before_ack() -> void:
 	var r := _rig(1)
 	var c = r.c(0)
 	r.grab_body(c, DUCK)
-	# the client streams before its grant arrived: epoch 0
+	# the client streams before its grant arrived: epoch 0. Accepted while the
+	# grant is unacknowledged (fix plan P9): the host copy follows from the first
+	# frame instead of hanging one RTT and then jumping.
 	r.step(40)
-	assert_eq(int(r.host.grab.counters().get("grab_held_early", 0)), 1, "epoch-0 frame counted, not pushed")
-	assert_eq(r.host.bodies.pushes.get(DUCK, []).size(), 0, "nothing pushed yet")
+	assert_eq(int(r.host.grab.counters().get("grab_held_early", 0)), 1, "epoch-0 frame counted")
+	assert_eq(r.host.bodies.pushes.get(DUCK, []).size(), 1, "and pushed to the follower")
+	assert_true(r.host.grab.host.rows[DUCK].await_ack, "the grant stays unacknowledged (an epoch-0 own_rel may follow)")
+	assert_false(r.host.grab.host.rows[DUCK].last_state.is_empty(), "last_state set")
 	r.steps(4, 40)
 	assert_true(r.host.bodies.pushes.get(DUCK, []).size() >= 2, "granted epoch frames pushed")
 	assert_eq(int(r.host.grab.counters().held_rejected), 0, "no rejections")

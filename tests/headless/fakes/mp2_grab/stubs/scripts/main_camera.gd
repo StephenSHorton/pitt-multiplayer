@@ -13,6 +13,7 @@ var equipped_item: RigidBody3D = null
 var max_grab_distance: float = 3.5
 var interact_ray: RayCast3D = null
 var hands: Marker3D = null
+var _rack_basis: Basis = Basis.IDENTITY
 var calls: Array = []          # [name, args...]
 var refuse_drop := false       # drop_object returns early (invalid snap spot)
 

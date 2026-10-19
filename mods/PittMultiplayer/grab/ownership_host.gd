@@ -13,9 +13,20 @@ const GrabAdapter = preload("../game/grab_adapter.gd")
 
 const HOST := 1
 const SILENCE_MS := 1500
-const FAR_MS := 500
+## continuous distance violations before a `far` revoke (a lag spike is not "walked away")
+const FAR_MS := 1000
 const REQ_SLACK_M := 2.0
 const HELD_SLACK_M := 2.5
+## held reach (5.2 step 4, 5.4): what the game lets a carried body trail behind
+## (main_camera.gd:335 drops beyond max_grab_distance of the hands, which sit up
+## to max_grab_distance from the eye) + slack + how far the owner moves in one
+## latency window; capped so a forged stream cannot reach across the room
+const REACH_SLACK_M := 1.0
+const REACH_LAG_S := 0.15
+const REACH_CAP_M := 9.0
+## the whole peer is quiet this long (the Session's last packet of any kind):
+## the link stalled, the hold is frozen instead of revoked for silence
+const LINK_STALL_MS := 500
 const REL_MAX_SPEED := 60.0
 const BOOST_S := 2.0
 const EPOCH_MASK := 0xFFFF
@@ -39,6 +50,7 @@ class Row extends RefCounted:
 	var last_state: Dictionary = {}
 	var far_since_ms := 0
 	var last_frame_far := false
+	var stalled := false         # frozen: the owner's whole link is quiet
 
 
 var grab = null                  # grab.gd (session, bodies, clock, signal)
@@ -46,9 +58,14 @@ var rows: Dictionary = {}        # eid -> Row
 var deny_rules: Array = []       # Callable(eid, node, peer) -> String
 var last_drop: Dictionary = {}   # eid -> {drop: Vector3, s: Dictionary} of the newest own_unequip
 var _place_q: Array = []         # [{eid, peer, info, frames}]
+var _held_seq: Dictionary = {}   # peer -> u8 sequence of its newest held frame (header byte 1)
+## held_early: epoch-0 frames (the owner had not seen its grant yet), accepted;
+## held_gaps: held frames lost on the way (sequence gaps); link_stalls: holds
+## frozen because the owner's link went quiet; grant_never_carried: revokes of
+## a grant that never got one held frame
 var counters := {"grants": 0, "denies": 0, "revokes": 0, "releases": 0, "held_rx": 0, "held_rejected": 0,
 	"held_early": 0, "rel_ignored": 0, "equip_ignored": 0, "host_refused": 0, "own_tx": 0,
-	"rel_clamped": 0}
+	"rel_clamped": 0, "held_gaps": 0, "link_stalls": 0, "grant_never_carried": 0}
 var deny_reasons: Dictionary = {}
 var revoke_reasons: Dictionary = {}
 
@@ -103,7 +120,7 @@ func can_take(eid: int, peer: int) -> String:
 			return "not_in_game"
 		var pose: Dictionary = grab.pose_of(peer)
 		if not bool(pose.get("ok", false)):
-			return "far"
+			return "no_pose"
 		var n3 := node as Node3D
 		if n3 != null and _eye(pose).distance_to(n3.global_position) > grab.max_grab_distance() + REQ_SLACK_M:
 			return "far"
@@ -121,6 +138,37 @@ static func _eye(pose: Dictionary) -> Vector3:
 	if e is Vector3:
 		return e
 	return pose.get("pos", Vector3.ZERO)
+
+
+## Held reach around the owner's eye (held frames, the far check, release states):
+## 2 x max_grab_distance + REACH_SLACK_M + |avatar velocity| x REACH_LAG_S, at
+## most REACH_CAP_M (never below the old max_grab_distance + HELD_SLACK_M).
+func held_reach(pose: Dictionary) -> float:
+	var mg: float = grab.max_grab_distance()
+	var v = pose.get("vel", Vector3.ZERO)
+	var speed: float = (v as Vector3).length() if v is Vector3 and (v as Vector3).is_finite() else 0.0
+	var r := 2.0 * mg + REACH_SLACK_M + speed * REACH_LAG_S
+	return minf(r, maxf(REACH_CAP_M, mg + HELD_SLACK_M))
+
+
+## Milliseconds since the Session last heard anything from peer, -1 when it
+## cannot tell. Session (owned by NET) has no getter yet: a `peer_last_rx_ms(peer)`
+## method is used when present, else its `_last_rx` table (clock.now() = ticks
+## msec, the same clock as grab.now() outside tests).
+func _link_quiet_ms(peer: int, now: int) -> int:
+	var s = grab.session
+	if s == null:
+		return -1
+	var t := -1
+	if s.has_method("peer_last_rx_ms"):
+		t = int(s.peer_last_rx_ms(peer))
+	else:
+		var table = s.get("_last_rx")
+		if typeof(table) == TYPE_DICTIONARY and (table as Dictionary).has(peer):
+			t = int(table[peer])
+	if t < 0:
+		return -1
+	return maxi(now - t, 0)
 
 
 # ------------------------------------------------------------------ messages from clients
@@ -222,10 +270,14 @@ func _owner_msg_ok(r: Row, peer: int, epoch: int, kinds: Array) -> bool:
 	return epoch == 0 and r.await_ack
 
 
-## Frame kind 5 from a client (5.2 step 4).
+## Frame kind 5 from a client (5.2 step 4). Epoch 0 is the owner's own request
+## before it saw the grant: accepted (after the distance check) while the grant
+## is unacknowledged, so the host copy follows from the first frame instead of
+## hanging one RTT and then jumping.
 func on_held_frame(peer: int, frame: Dictionary) -> void:
 	var now: int = grab.now()
 	var t_ms := int(frame.get("t_ms", 0))
+	_count_seq(peer, frame)
 	for rec in frame.get("records", []):
 		var eid := int(rec.get("eid", 0))
 		var r := rows.get(eid) as Row
@@ -233,21 +285,21 @@ func on_held_frame(peer: int, frame: Dictionary) -> void:
 			counters.held_rejected += 1
 			continue
 		var ep := int(rec.get("epoch", 0))
-		if ep == 0 and r.await_ack:
-			counters.held_early += 1
-			r.last_rx_ms = maxi(r.last_rx_ms, now)
-			continue
-		if ep != (r.epoch & EPOCH_MASK):
+		var early := ep == 0 and r.await_ack
+		if not early and ep != (r.epoch & EPOCH_MASK):
 			counters.held_rejected += 1
 			continue
 		var p: Vector3 = rec.get("p", Vector3.ZERO)
 		var pose: Dictionary = grab.pose_of(peer)
-		if bool(pose.get("ok", false)) and _eye(pose).distance_to(p) > grab.max_grab_distance() + HELD_SLACK_M:
+		if bool(pose.get("ok", false)) and _eye(pose).distance_to(p) > held_reach(pose):
 			counters.held_rejected += 1
 			r.last_frame_far = true
 			continue
 		r.last_frame_far = false
-		r.await_ack = false
+		if early:
+			counters.held_early += 1      # await_ack stays: an epoch-0 own_rel may follow
+		else:
+			r.await_ack = false
 		r.last_rx_ms = now
 		var st := {"p": p, "q": rec.get("q", Quaternion.IDENTITY), "l": rec.get("l", Vector3.ZERO),
 			"a": rec.get("a", Vector3.ZERO)}
@@ -256,6 +308,21 @@ func on_held_frame(peer: int, frame: Dictionary) -> void:
 		var bodies = grab.bodies()
 		if bodies != null:
 			bodies.host_follow_push(eid, st, t_ms)
+
+
+## Header byte 1 is the sender's u8 frame sequence (one per frame sent; an older
+## build sends 0 every time, which reads as a repeat and counts nothing). Gaps
+## are frames lost on the unreliable lane; a step back is reordering.
+func _count_seq(peer: int, frame: Dictionary) -> void:
+	var seq := int(frame.get("seq", 0)) & 0xFF
+	if not _held_seq.has(peer):
+		_held_seq[peer] = seq
+		return
+	var d := (seq - int(_held_seq[peer])) & 0xFF
+	if d == 0 or d >= 128:
+		return
+	counters.held_gaps += d - 1
+	_held_seq[peer] = seq
 
 
 # ------------------------------------------------------------------ host-side actions (10.3)
@@ -281,6 +348,7 @@ func _grant(eid: int, peer: int, kind: String, carry: bool, host_origin: bool) -
 	r.last_state = {}
 	r.far_since_ms = 0
 	r.last_frame_far = false
+	r.stalled = false
 	if bodies != null and kind == "held":
 		bodies.host_follow(eid, peer)
 	counters.grants += 1
@@ -299,6 +367,8 @@ func revoke(eid: int, reason: String) -> void:
 		return
 	counters.revokes += 1
 	revoke_reasons[reason] = int(revoke_reasons.get(reason, 0)) + 1
+	if r.owner != HOST and r.await_ack and r.last_state.is_empty():
+		counters.grant_never_carried += 1
 	var prev_owner := r.owner
 	var prev_kind := r.kind
 	if prev_owner == HOST:
@@ -348,21 +418,39 @@ func host_player_set(eid: int, kind: String) -> void:
 
 # ------------------------------------------------------------------ lifecycle
 
+## Silence and far checks (5.4). The distance is from the last accepted held
+## state (what the owner says it holds), not the follower node (which trails
+## it); a grant with no held frame yet (a rack panel still settling on the
+## client) has nothing to measure and only the silence check applies. When the
+## owner's whole link is quiet (no packet of any kind for LINK_STALL_MS) the
+## hold is frozen: the follower keeps its last state, no silence or far revoke
+## (its avatar pose is as stale as its frames), and the silence clock restarts
+## when the link does. The Session's own peer timeout (15 s) still ends it
+## with `left`.
 func tick(now: int) -> void:
-	var bodies = grab.bodies()
-	var reach: float = grab.max_grab_distance() + HELD_SLACK_M
 	for eid in rows.keys():
 		var r: Row = rows[eid]
 		if r.owner == HOST or r.kind != "held":
 			continue
+		if r.stalled:
+			if _link_quiet_ms(r.owner, now) >= LINK_STALL_MS:
+				continue
+			r.stalled = false
+			r.last_rx_ms = maxi(r.last_rx_ms, now)
 		if now - r.last_rx_ms > SILENCE_MS:
+			if _link_quiet_ms(r.owner, now) >= LINK_STALL_MS:
+				r.stalled = true
+				r.far_since_ms = 0
+				counters.link_stalls += 1
+				continue
 			revoke(eid, "silence")
 			continue
 		var far := r.last_frame_far
-		var node: Node3D = bodies.node_of(eid) as Node3D if bodies != null else null
 		var pose: Dictionary = grab.pose_of(r.owner)
-		if node != null and bool(pose.get("ok", false)) and _eye(pose).distance_to(node.global_position) > reach:
-			far = true
+		if not r.last_state.is_empty() and bool(pose.get("ok", false)):
+			var p: Vector3 = r.last_state.get("p", Vector3.ZERO)
+			if _eye(pose).distance_to(p) > held_reach(pose):
+				far = true
 		if far:
 			if r.far_since_ms == 0:
 				r.far_since_ms = now
@@ -396,6 +484,7 @@ func physics_tick() -> void:
 
 
 func peer_left(peer: int) -> void:
+	_held_seq.erase(peer)
 	for eid in rows.keys():
 		var r: Row = rows[eid]
 		if r.owner == peer and r.kind != "":
@@ -425,6 +514,7 @@ func world_stopped() -> void:
 	rows.clear()
 	last_drop.clear()
 	_place_q.clear()
+	_held_seq.clear()
 
 
 func wsnap_section() -> Dictionary:
@@ -459,6 +549,7 @@ func _change(r: Row, owner: int, kind: String, direct_peer: int, ev: String, rea
 	r.await_ack = false
 	r.far_since_ms = 0
 	r.last_frame_far = false
+	r.stalled = false
 	if owner == HOST:
 		r.last_state = {}
 	if direct_peer > 0 and direct_peer != HOST:
@@ -500,9 +591,8 @@ func _clamp_release(r: Row, peer: int, s: Dictionary) -> Dictionary:
 	var pose: Dictionary = grab.pose_of(peer)
 	if s.is_empty() or not bool(pose.get("ok", false)):
 		return s
-	var reach: float = grab.max_grab_distance() + HELD_SLACK_M
 	var p: Vector3 = s.get("p", Vector3.ZERO)
-	if _eye(pose).distance_to(p) <= reach:
+	if _eye(pose).distance_to(p) <= held_reach(pose):
 		return s
 	counters.rel_clamped += 1
 	var fb := r.last_state if not r.last_state.is_empty() else _node_state(r.eid)

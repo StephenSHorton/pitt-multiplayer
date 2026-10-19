@@ -151,9 +151,11 @@ counts that overrun the buffer, and positions beyond ±8000 m.
 
 **Frame kind 5: held body (client → host), ≤ 2 records**
 ```
-header (8 B): u8 kind=5 | u8 0 | u16 count | u32 client_ms
+header (8 B): u8 kind=5 | u8 seq | u16 count | u32 client_ms
 record (31 B): u32 eid | u16 epoch | i24 x,y,z | u32 rot | i16 v×3 | i16 w×3
 ```
+`seq` is the sender's frame counter mod 256 (one per frame sent); the host counts gaps as `held_gaps`. An
+older sender writes 0 every time, which reads as a repeat and counts nothing.
 
 Encoders/decoders: `Codec.encode_bodies(host_ms, seq, records: Array) -> PackedByteArray`,
 `Codec.decode_bodies(bytes) -> {host_ms, seq, records:[{eid, flags, epoch, p: Vector3, q: Quaternion,
@@ -601,8 +603,9 @@ The host's own player is peer 1: a host grab sets `{1, "held"}` so clients see `
    - Otherwise **predict**: `bodies.set_local_sim(eid, true)`, `super(obj, keep_hands)` (the game's carry runs
      unchanged: joint, gravity/inertia metas, velocity carry), and send `own_req {eid, seen_epoch}` (ch3).
 2. **Host** on `own_req` (`can_take(eid, peer)`): deny with a reason when the eid is unknown or despawned,
-   already owned (`owned`), its node carries any metas above (`busy`), the requester is not `in_game` or is
-   farther than `max_grab_distance + 2 m` (`far`; avatar pose vs body), or any GAMEPLAY deny rule says so
+   already owned (`owned`), its node carries any metas above (`busy`), the requester is not `in_game`, has
+   no avatar pose yet (`no_pose`) or is farther than `max_grab_distance + 2 m` (`far`; avatar pose vs
+   body), or any GAMEPLAY deny rule says so
    (cannon queue, vacuum bag, terminal arc, press stroke, cauldron ritual). Otherwise grant:
    `epoch += 1`, owner = peer, kind `held`, `bodies.host_follow(eid, peer)` (the host body becomes a
    kinematic follower), reply `own {ev:"grant", eid, epoch}`, broadcast `set`.
@@ -610,11 +613,13 @@ The host's own player is peer 1: a host grab sets `{1, "held"}` so clients see `
    drop) with a GRAB flag so the release path below does not send `own_rel`; then
    `bodies.set_local_sim(eid, false, host_epoch)` (snap or blend back to the host pose).
 4. **Held stream** (owner → host): while `picked_object == obj`, at 30 Hz, frame kind 5 on ch2 with the
-   exact local state and the granted epoch. Before the grant arrives, frames carry epoch 0 and the host
-   drops them. The host feeds valid frames (sender = owner, epoch = current, position within
-   `max_grab_distance + 2.5 m` of the sender's avatar) to `bodies.host_follow_push`, which drives the
-   kinematic follower 50 ms behind (not 100: the host copy interacts with the host world). Invalid frames
-   are counted (`held_rejected`); 0.5 s of continuous distance violations revokes (`far`).
+   exact local state and the granted epoch. Before the grant arrives, frames carry epoch 0; the host
+   accepts them from the owner while its grant is unacknowledged (counted `held_early`), so the host copy
+   follows from the first frame instead of hanging one RTT and then jumping. The host feeds valid frames
+   (sender = owner, epoch = current or that epoch 0, position within the held reach of the sender's eye:
+   `2 × max_grab_distance + 1 m + |avatar velocity| × 0.15 s`, at most 9 m) to `bodies.host_follow_push`,
+   which drives the kinematic follower 50 ms behind (not 100: the host copy interacts with the host world).
+   Invalid frames are counted (`held_rejected`); 1.0 s of continuous distance violations revokes (`far`).
 5. **Other clients** see the body through normal host frames with `HELD` (priority weight 4.0).
 
 ### 5.3 Release and throw handoff
@@ -643,11 +648,12 @@ The host's own player is peer 1: a host grab sets `{1, "held"}` so clients see `
 
 | Trigger (host) | Action |
 |---|---|
-| No held frame from the owner for 1.5 s (`held`) | revoke `silence`: `host_release(eid, last_state)`, epoch+1, `own {ev:"revoke"}` to the owner |
+| No held frame from the owner for 1.5 s (`held`) | revoke `silence`: `host_release(eid, last_state)`, epoch+1, `own {ev:"revoke"}` to the owner. A host-originated grant (rack withdraw) gets 1 s more; a revoke of a grant that never got a held frame is also counted `grant_never_carried` |
+| No packet of any kind from the owner for 0.5 s while its frames are silent (the link stalled, not the carry) | no revoke: the hold is frozen (the follower keeps its last state, no far check, `link_stalls`); the silence clock restarts when the link does. The Session's own 15 s peer timeout ends it as `left` |
 | Owner disconnects / leaves | revoke every eid they own; equipped tools are unequipped at the owner's last avatar pose (6.4) |
 | The body is consumed / starts a maw recycle / enters a cannon, vacuum, terminal arc, press stroke, cauldron | GAMEPLAY calls `grab.revoke(eid, reason)` (the game's own code already ran on the host) |
 | The entity despawns | ownership row deleted; the client hears `entity_removed` and drops the carry |
-| Owner farther than `max_grab_distance + 2.5 m` for 0.5 s | revoke `far` |
+| The last accepted held state (not the follower node) is beyond the held reach of the owner's eye (5.2 step 4), or its frames are, for 1.0 s | revoke `far`; nothing is measured before the first held frame |
 | Client opens a menu | the MP1 pause guard calls `release_held_object()` → normal release |
 
 On `own {ev:"revoke"}` the client force-drops with `release_held_object()` (no `own_rel`) and blends back.
@@ -809,9 +815,14 @@ values), `panel_stack` (the receiving peer's own stack, 6.11).
 `main_camera._try_rack_store` (:844) on a client → `rack_store {eid}` (the held panel): host recycles that
 entity and appends its pool id to the peer's host-side stack. `_try_withdraw_panel` (:863) /
 `_refill_from_panel_stack` (:934) → `rack_withdraw {}`: host spawns the panel at the peer's rig hands and
-calls `grab.grant(eid, peer, "held", carry=true)`; the client starts the carry with the game's
-`_carry_after_spawn` (:958) when the adopted puppet arrives. The client's `GameState.panel_stack` is the
-mirrored field (HUD count via `panel_stack_changed`).
+calls `grab.grant(eid, peer, "held", carry=true)`. The client starts the carry itself
+(`GrabAdapter.carry_granted`) once it has both the grant and the adopted puppet, in either order: two
+physics frames to settle (as the game does), then the game's `_begin_carry(panel, true)` turned to the
+camera's `_rack_basis`. It never calls the game's `_carry_after_spawn` (:958): that one's busy branch pushes
+the pool id back on the local rack and recycles the node, which on a client is a host-owned puppet. If the
+hands are full by then, the client sends `rack_store` for the panel (GAMEPLAY's client rack), else releases
+it where it is (`own_rel`). The client's `GameState.panel_stack` is the mirrored field (HUD count via
+`panel_stack_changed`).
 
 ### 6.12 Effects and achievements (`gameplay/fx.gd`)
 
@@ -1091,7 +1102,8 @@ disabled with a log line, MP1 suites still green).
   `maw_effect`, `interact_ray` dispatchers of 1.1, `main_camera.handle_input`, `_do_interact`,
   `_try_rack_store`, `_try_withdraw_panel`, `_refill_from_panel_stack`, `_carry_after_spawn`.
 - GRAB `grab/contract_grab.gd`, feature `mp2.grab`: `main_camera.picked_object`, `equipped_item`,
-  `max_grab_distance`, `_begin_carry`, `drop_object`, `release_held_object`, `handle_input`; metas are
+  `max_grab_distance`, `interact_ray`, `_rack_basis`, `_begin_carry`, `drop_object`, `release_held_object`,
+  `handle_input`; metas are
   strings (not checkable) and are listed in the file's comments.
 
 Any missing member disables multiplayer as a whole (MP1 §11).

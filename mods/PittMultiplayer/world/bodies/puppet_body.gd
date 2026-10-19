@@ -51,11 +51,15 @@ func node() -> Node3D:
 	return n if n != null and is_instance_valid(n) else null
 
 
+## last_flags follow the newest record only: an older record inserted behind it
+## (reordered on the unreliable lane) must not bring back a HELD of a carry that
+## already ended (GRAB's local refusal reads it through bodies.flags_of).
 func push(state: Dictionary) -> bool:
 	var ok := Interp.ring_push(ring, state)
 	if ok:
 		idle = false
-		last_flags = int(state.get("flags", 0))
+		if is_same(ring[ring.size() - 1], state):
+			last_flags = int(state.get("flags", 0))
 	return ok
 
 

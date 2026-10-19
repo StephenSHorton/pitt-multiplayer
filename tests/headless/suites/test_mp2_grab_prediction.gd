@@ -111,6 +111,31 @@ func as_drop(r: Rig, c) -> void:
 	c.cam.drop_object()
 
 
+func _panel(r: Rig) -> RigidBody3D:
+	var panel := RigidBody3D.new()
+	panel.add_to_group("draggable")
+	panel.gravity_scale = 0.0
+	r.parent.add_child(panel)
+	panel.global_position = Vector3(0, 0.65, -1.0)
+	return panel
+
+
+## The real path (no hand-made _carry_after_spawn): GRAB itself starts the
+## game's carry with the hands kept, after the settle frames, and never runs
+## the game's _carry_after_spawn (its busy branch recycles a host puppet).
+func _assert_granted_carry(r: Rig, c, panel: RigidBody3D, label: String) -> void:
+	assert_eq(c.cam.picked_object, panel, label + ": the game's carry ran")
+	assert_true(c.cam.calls.any(func(x): return x[0] == "_begin_carry" and x[1] == panel and x[2] == true),
+		label + ": _begin_carry(panel, keep_hands)")
+	assert_false(c.cam.calls.any(func(x): return x[0] == "_carry_after_spawn"), label + ": never _carry_after_spawn")
+	assert_true(c.bodies.is_local_sim(1500), label + ": local sim")
+	assert_false(c.grab.client.want_carry.has(1500), label + ": want_carry consumed")
+	assert_eq(int(c.grab.counters().grab_carry_started), 1, label + ": counted once")
+	r.deliver()
+	assert_eq(r.net.sent("own_req").size(), 0, label + ": no own_req for a granted body")
+	assert_eq(r.host.grab.hold_kind(1500), "held", label + ": host: held by the client")
+
+
 func test_unsolicited_grant_with_carry() -> void:
 	var r := _rig(1)
 	var c = r.c(0)
@@ -122,17 +147,112 @@ func test_unsolicited_grant_with_carry() -> void:
 	assert_eq(g.size(), 1, "grant sent")
 	assert_true(bool(g[0].carry), "carry flag")
 	assert_true(c.grab.is_mine(1500), "client: mine before the puppet exists")
-	var panel := RigidBody3D.new()
-	panel.add_to_group("draggable")
-	r.parent.add_child(panel)
+	var panel := _panel(r)
 	c.bodies.add(1500, panel)
 	assert_true(c.bodies.is_local_sim(1500), "adopted puppet goes local at once")
+	assert_true(c.cam.picked_object == null, "the carry waits for the settle frames")
 	r.as_peer(c)
-	c.cam._carry_after_spawn(panel)
-	assert_eq(c.cam.picked_object, panel, "the game's carry ran")
+	await wait_physics(3)
+	_assert_granted_carry(r, c, panel, "grant first")
+	# the held stream then carries the granted epoch
+	r.step(40)
+	assert_true(r.host.bodies.pushes.get(1500, []).size() >= 1, "held frames pushed on the host")
+	r.cleanup()
+
+
+## The usual order on the wire: flush_lifecycle sends the spawn before the grant.
+func test_spawn_then_grant_with_carry() -> void:
+	var r := _rig(1)
+	var c = r.c(0)
+	var panel := _panel(r)
+	c.bodies.add(1500, panel)
+	assert_false(c.bodies.is_local_sim(1500), "a plain puppet before the grant")
+	r.host.bodies.nodes[1500] = r.host.nodes[DUCK]
+	r.host.grab.grant(1500, c.id, "held", true)
 	r.deliver()
-	assert_eq(r.net.sent("own_req").size(), 0, "no own_req for a granted body")
-	assert_eq(r.host.grab.hold_kind(1500), "held", "host: held by the client")
+	assert_true(c.bodies.is_local_sim(1500), "grant with carry: local at once")
+	r.as_peer(c)
+	await wait_physics(3)
+	_assert_granted_carry(r, c, panel, "spawn first")
+	r.cleanup()
+
+
+## Hands full when the panel settled (the player grabbed something within the
+## RTT): no carry; without GAMEPLAY the panel is released where it is (own_rel).
+func test_busy_player_releases_the_granted_panel() -> void:
+	var r := _rig(1)
+	var c = r.c(0)
+	var panel := _panel(r)
+	c.bodies.add(1500, panel)
+	r.host.bodies.nodes[1500] = r.host.nodes[DUCK]
+	r.host.grab.grant(1500, c.id, "held", true)
+	r.deliver()
+	r.grab_body(c, DUCK)                       # the hands are full now
+	r.as_peer(c)
+	await wait_physics(3)
+	assert_eq(c.cam.picked_object, c.nodes[DUCK], "still carrying the duck")
+	assert_false(c.cam.calls.any(func(x): return x[0] == "_begin_carry" and x[1] == panel), "no carry of the panel")
+	var rels: Array = r.net.q.filter(func(m): return m.get("k", "") == "own_rel" and int(m.msg.eid) == 1500)
+	assert_eq(rels.size(), 1, "own_rel for the panel")
+	assert_eq(int(c.grab.counters().grab_carry_busy), 1, "counted busy")
+	assert_false(c.grab.is_mine(1500), "no longer mine")
+	r.deliver()
+	assert_eq(r.host.grab.hold_kind(1500), "", "host: the panel is free again")
+	r.cleanup()
+
+
+class FakeRack extends RefCounted:
+	var stored: Array = []
+
+	func client_store(panel: Object) -> bool:
+		stored.append(panel)
+		return true
+
+
+class FakeGameplay extends RefCounted:
+	var rack = FakeRack.new()
+
+	func mod_name() -> String:
+		return "gameplay"
+
+
+## Busy with GAMEPLAY present: rack_store puts the panel back on the rack (the
+## vanilla busy case) instead of dropping it.
+func test_busy_player_rack_stores_the_granted_panel() -> void:
+	var r := _rig(1)
+	var c = r.c(0)
+	var gp := FakeGameplay.new()
+	c.session.register_module(gp)
+	var panel := _panel(r)
+	c.bodies.add(1500, panel)
+	r.host.bodies.nodes[1500] = r.host.nodes[DUCK]
+	r.host.grab.grant(1500, c.id, "held", true)
+	r.deliver()
+	r.grab_body(c, DUCK)
+	r.as_peer(c)
+	await wait_physics(3)
+	assert_eq(gp.rack.stored, [panel], "rack_store for the panel")
+	assert_eq(int(c.grab.counters().grab_carry_racked), 1, "counted racked")
+	var rels: Array = r.net.q.filter(func(m): return m.get("k", "") == "own_rel" and int(m.msg.eid) == 1500)
+	assert_eq(rels.size(), 0, "no own_rel: the host's store revokes it")
+	r.cleanup()
+
+
+## A grant revoked during the settle frames starts no carry.
+func test_granted_carry_dropped_when_revoked_meanwhile() -> void:
+	var r := _rig(1)
+	var c = r.c(0)
+	var panel := _panel(r)
+	c.bodies.add(1500, panel)
+	r.host.bodies.nodes[1500] = r.host.nodes[DUCK]
+	r.host.grab.grant(1500, c.id, "held", true)
+	r.deliver()
+	r.host.grab.revoke(1500, "rack")
+	r.deliver()
+	r.as_peer(c)
+	await wait_physics(3)
+	assert_true(c.cam.picked_object == null, "no carry after the revoke")
+	assert_eq(int(c.grab.counters().grab_carry_started), 0, "nothing started")
 	r.cleanup()
 
 
