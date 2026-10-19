@@ -99,6 +99,7 @@ var _ft := PackedFloat32Array()   # ms between rendered frames, ring of FRAME_WI
 var _ft_i := 0
 var _last_frame := -1
 var _last_frame_us := 0
+var _frame_hooked := false        # _sample_frame runs on SceneTree.process_frame (every rendered frame)
 var _stale := PackedInt32Array()  # ms since the last record, ring of STALE_WINDOW
 var _stale_i := 0
 var _stale_k := 0
@@ -115,6 +116,7 @@ class Drive:
 	var out_w := Vector3.ZERO     # angular velocity of the curve last frame (Interp w)
 	var rc := Vector3.ZERO        # rotation correction (axis * angle, world), on corr0's clock
 	var still := false            # the last write was a still pose (before / hold / sleep, no blend)
+	var writes := 0               # transform writes (a still pose is written once, see _drive)
 	var lead_ms := 0              # release lead at lead_start_ms
 	var lead_start_ms := 0
 	var pregrab: Dictionary = {}  # the newest state when the ring was cleared (a deny hands back to it)
@@ -548,7 +550,8 @@ func physics_step() -> void:
 	var now := _now()
 	var dt := clampf(float(now - _last_drive_ms) / 1000.0, 0.0, 0.1) if _last_drive_ms > 0 else 1.0 / 60.0
 	_last_drive_ms = now
-	_sample_frame()
+	if not _frame_hooked:
+		_hook_frames()
 	if now - _stats_ms >= STATS_MS:
 		_stats_ms = now
 		_publish_stats()
@@ -579,8 +582,6 @@ func physics_step() -> void:
 		if pb.hidden or pb.idle or pb.ring.is_empty():
 			done.append(eid)
 			continue
-		if me != null:
-			_sample_stale(pb, node, me, now)
 		if now - pb.last_rx_ms > DRIVE_IDLE_MS and pb.has_out and pb.corr0 == Vector3.ZERO:
 			done.append(eid)
 			continue
@@ -589,6 +590,8 @@ func physics_step() -> void:
 			done.append(eid)
 	for eid in done:
 		active.erase(eid)
+	if me != null:
+		_sample_stale_all(me, now)
 	_verify_some()
 
 
@@ -712,7 +715,11 @@ func _drive(pb: PuppetBody, node: Node3D, rt: int, dt: float, now: int) -> void:
 	d.out_w = s.w
 	var blending := k > 0.0
 	var still := not blending and d.lead_ms <= 0 and (mode == "before" or mode == "hold" or mode == "sleep")
-	var unchanged := still and d.still and not snap and out == pb.out_p and oq == d.out_q
+	# unchanged also needs the node still where it was put: game code may move a
+	# frozen kinematic body (scripted), and a still pose is not rewritten otherwise
+	var unchanged := still and d.still and not snap and out == pb.out_p and oq == d.out_q \
+			and node.global_position.is_equal_approx(out) \
+			and absf(node.global_basis.get_rotation_quaternion().dot(oq)) > 0.999999   # q and -q: one rotation
 	d.still = still
 	pb.prev_target = target
 	pb.prev_vel = s.v          # the curve's own derivative (Interp), zero when it stands still
@@ -720,7 +727,9 @@ func _drive(pb: PuppetBody, node: Node3D, rt: int, dt: float, now: int) -> void:
 	d.out_q = oq
 	pb.has_out = true
 	if not unchanged:
-		# a still pose (before / hold / sleep) is written once, not every frame
+		# a still pose (before / hold / sleep) is written once, not every frame;
+		# written again only when game code moved the node off it
+		d.writes += 1
 		node.global_transform = Transform3D(Basis(oq).scaled(node.global_basis.get_scale()), out)
 	if snap:
 		# a teleport: no interpolated streak from the old pose (physics interpolation is on)
@@ -1085,12 +1094,14 @@ func _expire(now: int) -> void:
 
 ## Client stats (P1), every STATS_MS into counters, so the `mp stats` line and
 ## dump() carry them (bodies.counters() copies every key):
-##   cl_frame_p95_ms / cl_frame_max_ms: time between rendered frames over the
-##     last FRAME_WINDOW frames
+##   cl_frame_p95_ms / cl_frame_max_ms: time between rendered frames
+##     (SceneTree.process_frame, not physics steps) over the last FRAME_WINDOW frames
 ##   cl_physics_load: physics process time per tick x tick rate (1.0 = the tick budget)
 ##   cl_phys_active: Performance PHYSICS_3D_ACTIVE_OBJECTS
 ##   cl_stale_p95_ms / cl_stale_n: now - last record for puppets within 10 m of
-##     the local player moving faster than 0.5 m/s (MP2-DESIGN 8: p95 <= 150 ms)
+##     the local player whose newest record moves faster than 0.5 m/s, sampled
+##     over every puppet (driven or not, so a starved body past DRIVE_IDLE_MS
+##     still counts) (MP2-DESIGN 8: p95 <= 150 ms)
 ##   cl_active: puppets driven this frame
 func stats() -> Dictionary:
 	var ft := Array(_ft)
@@ -1118,7 +1129,18 @@ func _publish_stats() -> void:
 		counters[k] = st[k]
 
 
-## Time between rendered frames (physics steps of one frame share it).
+## Connects _sample_frame to SceneTree.process_frame once, so every rendered
+## frame is sampled, also the ones that run no physics step (render rate above
+## the tick rate). Without a tree (never in game) nothing is sampled. Freeing
+## the replicator drops the connection with it.
+func _hook_frames() -> void:
+	_frame_hooked = true
+	var tree := Engine.get_main_loop() as SceneTree
+	if tree != null and not tree.process_frame.is_connected(_sample_frame):
+		tree.process_frame.connect(_sample_frame)
+
+
+## Time between rendered frames (one sample per process frame).
 func _sample_frame() -> void:
 	var f := Engine.get_process_frames()
 	if f == _last_frame:
@@ -1140,6 +1162,19 @@ func _stale_origin() -> Node3D:
 		return null
 	var p = bodies.adapter.local_player()
 	return p if p is Node3D and (p as Node3D).is_inside_tree() else null
+
+
+## Staleness over every puppet a viewer would see move: not only the active
+## set, which drops a body DRIVE_IDLE_MS after its last record (that cut-off
+## would cap the statistic in exactly the starvation it is meant to show).
+func _sample_stale_all(me: Node3D, now: int) -> void:
+	for eid in puppets:
+		var pb: PuppetBody = puppets[eid]
+		if pb == null or pb.local_sim or pb.hidden or pb.ring.is_empty():
+			continue
+		var node := pb.node()
+		if node != null:
+			_sample_stale(pb, node, me, now)
 
 
 func _sample_stale(pb: PuppetBody, node: Node3D, me: Node3D, now: int) -> void:

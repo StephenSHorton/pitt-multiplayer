@@ -316,7 +316,7 @@ first and drops the carry.
   starts only when new data arrives (the ring changed), from where the puppet would be drawn on the old
   curve, for position and rotation. A running blend restarts only when the new error is larger than what is
   left of it; a smaller one is folded in and the blend still ends on time. A still pose (before / hold /
-  sleep) is written once, not every frame.
+  sleep) is written once, not every frame, and again only if game code moved the node off it.
 - It writes `global_transform` (a kinematic move, so the local player is pushed and carried; physics
   interpolation is on, project.godot:187, so rendering is smooth) and re-asserts `freeze`/`freeze_mode`.
 - `SLEEP`: place exactly and stop driving until the next record.
@@ -886,7 +886,9 @@ within Steam relay limits.
 PittMPTests asserts on these (11.2 B5, B6). Staleness metric: for bodies within 10 m of the client avatar and
 moving faster than 0.5 m/s, `now − last_update` p95 ≤ 150 ms at normal detail without conditioning.
 The client measures it live: the replicator's counters carry `cl_stale_p95_ms` / `cl_stale_n` (last 2048
-samples at 10 Hz) next to `cl_frame_p95_ms` / `cl_frame_max_ms` (last 600 rendered frames),
+samples at 10 Hz over every visible puppet, also ones no longer driven, so starvation past the 2 s idle cut
+still counts) next to `cl_frame_p95_ms` / `cl_frame_max_ms` (last 600 rendered frames, sampled on
+`SceneTree.process_frame`, not per physics step),
 `cl_physics_load`, `cl_phys_active` (`PHYSICS_3D_ACTIVE_OBJECTS`) and `cl_active`, refreshed every second
 (so `mp stats` and `dump()` see them); netq carries `frame_p95_ms`, `stale_p95_ms` and `physics_load` to the host.
 

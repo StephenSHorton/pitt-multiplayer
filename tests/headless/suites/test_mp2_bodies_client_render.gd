@@ -271,10 +271,23 @@ func test_still_poses_are_written_once() -> void:
 	_feed(c, pb, _s(c.t_host - 1000, Vector3(1, 2, 3), Vector3(1, 0, 0)))
 	_step(c)
 	assert_true(n.global_position.distance_to(Vector3(1.25, 2, 3)) < 0.0001, "held at the 250 ms cap")
-	n.global_position = Vector3(9, 9, 9)         # a write would put it back
+	_step(c)                                     # the first still frame is written
+	var d = c._drv[9]
+	var w := int(d.writes)
+	for i in 5:
+		_step(c)
+	assert_eq(int(d.writes), w, "hold: no transform write while nothing changes")
+	n.global_position = Vector3(9, 9, 9)         # game code moves the frozen body
+	_step(c)
+	assert_true(n.global_position.distance_to(Vector3(1.25, 2, 3)) < 0.0001,
+		"moved off the still pose: written again (%s)" % str(n.global_position))
+	assert_eq(int(d.writes), w + 1, "one write puts it back")
+	n.global_basis = Basis(Vector3.UP, 0.5)      # a rotation alone counts too
+	_step(c)
+	assert_true(n.global_basis.get_rotation_quaternion().is_equal_approx(Quaternion.IDENTITY), "rotation restored")
 	_step(c)
 	_step(c)
-	assert_eq(n.global_position, Vector3(9, 9, 9), "hold: no transform write while nothing changes")
+	assert_eq(int(d.writes), w + 2, "and still again after that")
 
 
 # ------------------------------------------------------------------ release (P8)
@@ -424,6 +437,45 @@ func test_client_stats_keys_and_staleness() -> void:
 	assert_true(c.counters.has("cl_stale_p95_ms"), "published into counters (mp stats line, dump)")
 	var q := c.take_netq()
 	assert_true(q.has("frame_p95_ms") and q.has("stale_p95_ms"), "netq carries them to the host")
+
+
+## A near moving body the host stops sending leaves the active set after
+## DRIVE_IDLE_MS; its staleness keeps being sampled past that (regime A).
+func test_starved_body_staleness_passes_the_idle_cut() -> void:
+	var b := StubBodies.new()
+	var me := Node3D.new()
+	runner.add_child(me)
+	_nodes.append(me)
+	b.adapter.player = me
+	var c := _client(b)
+	var pb := _puppet(c, 22, Vector3(1, 0, 0))
+	_feed(c, pb, _s(c.t_host - 150, pb.node().global_position, Vector3(3, 0, 0)))
+	for i in 200:
+		_step(c)          # 3.2 s without a record
+	assert_false(c.active.has(22), "dropped from the driven set (DRIVE_IDLE_MS)")
+	var st := c.stats()
+	var worst := 0
+	for ms in c._stale:
+		worst = maxi(worst, int(ms))
+	assert_true(worst > c.DRIVE_IDLE_MS + 1000, "still sampled after the idle cut (largest %d ms)" % worst)
+	assert_true(int(st.cl_stale_p95_ms) > c.DRIVE_IDLE_MS, "p95 shows the starvation (%d ms)" % int(st.cl_stale_p95_ms))
+	# a hidden puppet is not something a viewer sees move
+	var n0: int = c._stale.size()
+	pb.hidden = true
+	for i in 12:
+		_step(c)
+	assert_eq(c._stale.size(), n0, "hidden: not sampled")
+
+
+## Frame times come from every rendered frame (SceneTree.process_frame), not
+## from physics steps: frames without a physics step are sampled too.
+func test_frame_times_sample_rendered_frames() -> void:
+	var c := _client()
+	c.physics_step()      # hooks process_frame
+	var n0: int = c._ft.size()
+	for i in 12:
+		await tree.process_frame
+	assert_true(c._ft.size() - n0 >= 10, "%d samples over 12 rendered frames, 1 physics step" % (c._ft.size() - n0))
 
 
 func test_client_stats_in_session_dump() -> void:
