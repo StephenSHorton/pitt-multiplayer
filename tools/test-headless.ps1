@@ -52,9 +52,13 @@ foreach ($m in Get-ChildItem -Directory (Join-Path $root 'mods')) {
 }
 $pittapiPath = ConvertTo-GodotPath (Join-Path $modsDir 'PittAPI\pittapi.gd')
 $tpl = Get-Content -Raw -LiteralPath (Join-Path $root 'tests\headless\project.godot.template')
+# PITTAPI_HEADLESS_NAME gives a run its own user:// folder, so parallel runs (one per git worktree)
+# don't wipe each other's
+$headlessName = if ($env:PITTAPI_HEADLESS_NAME) { $env:PITTAPI_HEADLESS_NAME } else { 'PittAPIHeadless' }
+$tpl = $tpl -replace 'config/name="PittAPIHeadless"', "config/name=`"$headlessName`""
 Write-Utf8NoBom (Join-Path $proj 'project.godot') ($tpl -replace '\{\{PITTAPI_PATH\}\}', $pittapiPath)
 
-$userDir = Join-Path $env:APPDATA 'Godot\app_userdata\PittAPIHeadless'
+$userDir = Join-Path $env:APPDATA "Godot\app_userdata\$headlessName"
 if (-not $KeepUserDir -and (Test-Path -LiteralPath $userDir)) { Remove-Item -Recurse -Force -LiteralPath $userDir }
 
 Write-Step 'Importing (builds the global class cache for the fake BigInt)'
