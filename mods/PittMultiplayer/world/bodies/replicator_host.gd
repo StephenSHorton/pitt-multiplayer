@@ -297,7 +297,7 @@ var _n_kinematic := 0
 var _n_follow := 0
 var _n_moving := 0
 var counters := {"tracked": 0, "untracked": 0, "records_tx": 0, "bytes_tx": 0, "packets_tx": 0, "ents_msgs": 0,
-	"meta_msgs": 0, "sel_overrun": 0, "snaps": 0, "overload_events": 0, "follow_pushes": 0, "releases": 0,
+	"meta_msgs": 0, "sel_overrun": 0, "snaps": 0, "overload_events": 0, "follow_pushes": 0, "follow_extrap": 0, "releases": 0,
 	"sleep_capped": 0, "rest_rot_moves": 0, "net_rests": 0, "net_rest_wakes": 0, "gated": 0, "refreshes": 0,
 	"first_sleeps": 0, "cand_shed": 0, "n_candidates": 0, "awake_hidden": 0, "awake_kinematic": 0,
 	"awake_follow": 0, "awake_moving": 0, "net_rest_watch": 0, "sleep_backlog": 0, "sleep_oldest_ms": 0,
@@ -910,10 +910,18 @@ func _drive_followers(now: int) -> void:
 			q = (s0.q as Quaternion).slerp(s1.q, u)
 			v = (s1.p - s0.p) / (float(int(s1.rx) - int(s0.rx)) / 1000.0)
 		elif int(e.follow.back().rx) <= rt:
+			# the stream ran dry (a late or lost frame, a follower clock snap): carry on
+			# along the motion the frames show, never faster than the sender's velocity.
+			# A carried body's own velocity is the carry's pull toward the hands (a full
+			# crate reports about 4 m/s while it hangs still); extrapolated on its own it
+			# threw the host copy 0.3 m off for one late frame.
 			var last: Dictionary = e.follow.back()
-			p = last.p + last.l * (float(mini(rt - int(last.rx), 250)) / 1000.0)
+			var ve := _follow_extrap_v(e.follow)
+			var ahead := mini(rt - int(last.rx), 250)
+			p = last.p + ve * (float(ahead) / 1000.0)
 			q = last.q
-			v = last.l if rt - int(last.rx) < 250 else Vector3.ZERO
+			v = ve if rt - int(last.rx) < 250 else Vector3.ZERO
+			counters.follow_extrap += 1
 		# 0.2.2: bounded acceleration toward the interpolated pose (see FOLLOW_MAX_ACCEL)
 		var dt := 1.0 / float(maxi(1, Engine.physics_ticks_per_second))
 		if not e.follow_has or e.follow_out.distance_to(p) > FOLLOW_SNAP_M:
@@ -928,6 +936,27 @@ func _drive_followers(now: int) -> void:
 			e.follow_v += dv
 			e.follow_out += e.follow_v * dt
 		n.global_transform = Transform3D(Basis(q).scaled(n.global_basis.get_scale()), e.follow_out)
+
+
+## Extrapolation velocity of a follower past its newest frame: the observed motion
+## of the last two frames (sender spacing t, else arrival rx), no longer than the
+## newest frame's own velocity (which bounds a pair of frames that arrived in one
+## burst); one frame alone holds still.
+static func _follow_extrap_v(buf: Array) -> Vector3:
+	if buf.size() < 2:
+		return Vector3.ZERO
+	var a: Dictionary = buf[buf.size() - 2]
+	var b: Dictionary = buf[buf.size() - 1]
+	var dt_ms := posmod(int(b.get("t", 0)) - int(a.get("t", 0)) + 0x80000000, 0x100000000) - 0x80000000
+	if int(a.get("t", 0)) == 0 or int(b.get("t", 0)) == 0 or dt_ms <= 0 or dt_ms >= 500:
+		dt_ms = int(b.rx) - int(a.rx)
+	if dt_ms <= 0:
+		return Vector3.ZERO
+	var obs: Vector3 = ((b.p as Vector3) - (a.p as Vector3)) / (float(dt_ms) / 1000.0)
+	var cap: float = (b.get("l", Vector3.ZERO) as Vector3).length()
+	if obs.length() > cap:
+		obs = obs.normalized() * cap if cap > 0.0 else Vector3.ZERO
+	return obs
 
 
 ## One pass over the awake set per send tick (P10: sampling and the shared candidate

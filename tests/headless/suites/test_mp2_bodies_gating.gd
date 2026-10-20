@@ -362,6 +362,36 @@ func test_hidden_frozen_bodies_rest_and_followers_set() -> void:
 	_teardown()
 
 
+func test_dry_follower_extrapolates_the_observed_motion() -> void:
+	var h := _setup()
+	var rep = h[0]
+	var f: Array = _body(rep, Vector3(2, 1, 0), false)
+	rep.peer_ready(PEER)
+	_tick(rep, 1)
+	rep.follow(f[0], 3)
+	# a full crate hangs still in the hands while its carry velocity reads 4 m/s up
+	for i in 4:
+		rep.follow_push(f[0], {"p": Vector3(2, 1.5, 0), "q": Quaternion.IDENTITY, "l": Vector3(0, 4, 0),
+			"a": Vector3.ZERO}, 1000 + i * 33)
+		rep.t += 33
+	var n := f[1] as Node3D
+	var x0: int = rep.counters.follow_extrap
+	for k in 10:
+		rep._drive_followers(rep.t + 150 + k * 16)
+	assert_true(int(rep.counters.follow_extrap) > x0, "the stream ran dry: extrapolated")
+	assert_true(n.global_position.distance_to(Vector3(2, 1.5, 0)) < 0.02,
+		"a still body is not thrown along its carry velocity (%s)" % str(n.global_position))
+	# moving frames: the observed motion, capped by the sender's velocity
+	var buf := [{"rx": 0, "t": 100, "p": Vector3.ZERO, "l": Vector3(1, 0, 0)},
+		{"rx": 5, "t": 133, "p": Vector3(0.033, 0, 0), "l": Vector3(1, 0, 0)}]
+	assert_true(rep._follow_extrap_v(buf).distance_to(Vector3(1, 0, 0)) < 0.01, "steady motion: its velocity")
+	buf[1].l = Vector3(0.5, 0, 0)
+	assert_true(rep._follow_extrap_v(buf).distance_to(Vector3(0.5, 0, 0)) < 0.01, "never faster than the sender says")
+	assert_eq(rep._follow_extrap_v([buf[0]]), Vector3.ZERO, "one frame alone holds still")
+	rep.clear()
+	_teardown()
+
+
 func test_overload_sheds_candidates_not_a_lone_peers_bytes() -> void:
 	var h := _setup()
 	var rep = h[0]

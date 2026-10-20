@@ -252,7 +252,19 @@ func _g10() -> void:
 			contacts.append({"name": str(b.name), "eid": int(bodies().eid_of(b)), "frozen": b is RigidBody3D and b.freeze,
 				"local_sim": bodies().is_local_sim(int(bodies().eid_of(b)))})
 		report.value(tag + "_held_contacts", contacts)
-		report.mark(tag + "_holding", {"g10_pos": Crate.arr(crate.global_position)})
+		var mark_p := crate.global_position
+		report.mark(tag + "_holding", {"g10_pos": Crate.arr(mark_p)})
+		var drift := 0.0
+		var t_mark := Time.get_ticks_msec()
+		var drift_at := 0
+		while Time.get_ticks_msec() - t_mark < 800:
+			await tree().physics_frame
+			var dd := crate.global_position.distance_to(mark_p)
+			if dd > drift:
+				drift = dd
+				drift_at = Time.get_ticks_msec() - t_mark
+		report.value(tag + "_client_drift_after_mark", {"max_m": drift, "at_ms": drift_at,
+			"v": crate.linear_velocity.length() if crate is RigidBody3D else -1.0})
 		await wait_peer_mark(tag + "_follow_checked", 10.0)
 		await Crate.swing(self)
 		await sleep_ms(500)

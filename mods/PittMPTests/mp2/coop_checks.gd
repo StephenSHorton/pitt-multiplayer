@@ -153,6 +153,45 @@ func _w2_clear(bench: Node3D) -> void:
 			g("ObjectPoolManager").recycle(n)
 
 
+
+## W2 diagnostics while LMB is held: what the interact ray points at whenever the
+## bench is not crafting (a duck in the ray stops the hold), frame pacing.
+func _w2_watch(bench: Node3D, ms: int, tag: String) -> void:
+	var ray = _ray()
+	var cam := tree().get_first_node_in_group("main_camera")
+	var t0 := Time.get_ticks_msec()
+	var idle := 0
+	var frames := 0
+	var seen: Dictionary = {}
+	var crafting_starts := 0
+	var was := false
+	var worst_ms := 0
+	var last := t0
+	while Time.get_ticks_msec() - t0 < ms:
+		await tree().process_frame
+		var t := Time.get_ticks_msec()
+		worst_ms = maxi(worst_ms, t - last)
+		last = t
+		frames += 1
+		var c: bool = bench.get("is_crafting") == true
+		if c and not was:
+			crafting_starts += 1
+		was = c
+		if not c:
+			idle += 1
+			var lc = ray.get("last_collider") if ray != null else null
+			var key: String = "null" if lc == null else (str(lc.name) + (" product" if (lc is Node and lc.is_in_group("product")) else ""))
+			if lc == bench:
+				key = "bench"
+			var po = cam.get("picked_object") if cam != null else null
+			if po != null:
+				key += " picked:" + str(po.name)
+			seen[key] = int(seen.get(key, 0)) + 1
+	report.value(tag + "_hold_diag", {"frames": frames, "idle_frames": idle, "starts": crafting_starts,
+		"idle_ray": seen, "worst_frame_ms": worst_ms, "steps_cap": Engine.max_physics_steps_per_frame,
+		"fps": Engine.get_frames_per_second()})
+
+
 func w2_host() -> void:
 	report.begin("W2_bench_hold_keeps_crafting")
 	var bench := _bench()
@@ -172,7 +211,7 @@ func w2_host() -> void:
 	var host_n: int = await _w2_count(bench, func():
 		await _at_bench(bench)
 		_hold_lmb(true)
-		await sleep_ms(int(W2_HOLD_S * 1000.0))
+		await _w2_watch(bench, int(W2_HOLD_S * 1000.0), "w2_host")
 		_hold_lmb(false))
 	report.value("w2_counts", {"client": client_n, "host": host_n, "hold_s": W2_HOLD_S})
 	report.check("w2_host_hold_crafts_several", host_n >= 2, "%d ducks in %.0f s" % [host_n, W2_HOLD_S])
@@ -198,7 +237,7 @@ func w2_client() -> void:
 	report.check("w2_client_ray_on_bench", on, "")
 	_hold_lmb(true)
 	report.mark("w2_client_holding")
-	await sleep_ms(int(W2_HOLD_S * 1000.0))
+	await _w2_watch(bench, int(W2_HOLD_S * 1000.0), "w2_client")
 	_hold_lmb(false)
 	await sleep_ms(300)
 	await _step_back(bench.global_position, 2.5)

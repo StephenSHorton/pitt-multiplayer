@@ -228,6 +228,36 @@ func _g10_ducks_inside(tag: String, crate: Node3D, ducks: Array) -> void:
 	report.check(tag + "_host_ducks_inside", not ducks.is_empty() and out.is_empty(), "outside (crate frame) %s" % str(out))
 
 
+## Where the host copy's error comes from: the held stream (last accepted state,
+## its age, the follower buffer) against the client's marked pose and the node.
+func _follow_diag(eid: int, crate: Node3D, cp: Vector3) -> Dictionary:
+	var out := {}
+	var gh = grab().get("host")
+	var row = gh.rows.get(eid, null) if gh != null else null
+	if row != null and not (row.last_state as Dictionary).is_empty():
+		var sp: Vector3 = row.last_state.get("p", Vector3.ZERO)
+		out["node_vs_stream_m"] = crate.global_position.distance_to(sp)
+		out["stream_vs_client_m"] = sp.distance_to(cp) if cp != Vector3.INF else -1.0
+		out["stream_age_ms"] = int(grab().now()) - int(row.last_rx_ms)
+		out["stalled"] = bool(row.stalled) if "stalled" in row else false
+	var bh = bodies().get("host")
+	var e = bh.ents.get(eid, null) if bh != null else null
+	if e != null:
+		out["follow_n"] = (e.follow as Array).size()
+		out["follow_out_vs_node_m"] = (e.follow_out as Vector3).distance_to(crate.global_position)
+		if not (e.follow as Array).is_empty():
+			out["buf_last_vs_client_m"] = (e.follow.back().p as Vector3).distance_to(cp) if cp != Vector3.INF else -1.0
+			out["buf_last_l"] = (e.follow.back().l as Vector3).length()
+		out["overload"] = float(bh.get("overload")) if bh.get("overload") != null else -1.0
+		out["follow_extrap"] = int(bh.counters.get("follow_extrap", -1))
+	var c: Dictionary = grab().counters()
+	for k in ["grab_held_rx", "held_rejected", "grab_held_early", "grab_held_gaps", "grab_link_stalls"]:
+		out[k] = c.get(k, -1)
+	out["fps"] = Engine.get_frames_per_second()
+	out["steps_cap"] = Engine.max_physics_steps_per_frame
+	return out
+
+
 func _g10() -> void:
 	report.begin("G10_crate_with_ducks")
 	var pose: Dictionary = session.avatar_pose(client_peer())
@@ -302,6 +332,7 @@ func _g10() -> void:
 			var cp := Crate.vec(held.get("g10_pos", []))
 			var d := crate.global_position.distance_to(cp) if cp != Vector3.INF else 99.0
 			report.value(tag + "_follow_err_m", d)
+			report.value(tag + "_follow_diag", _follow_diag(eid, crate, cp))
 			report.check(tag + "_host_copy_follows_15cm", d <= 0.15, "%.3f m" % d)
 			report.check(tag + "_host_copy_lifted", crate.global_position.y - y0 >= Crate.LIFT_M, "dy %.3f m" % (
 				crate.global_position.y - y0))
