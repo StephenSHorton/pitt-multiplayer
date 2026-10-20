@@ -4,8 +4,18 @@ extends RefCounted
 ## adopted under the host eid, L7) or the scene's fixture body, frozen
 ## KINEMATIC and driven from host frames:
 ##   render time rt = host_now - interp_delay (clamp(mean lateness + 2 x jitter + 33, 66, 200) ms),
-##   Hermite / slerp between ring states, extrapolation <= 250 ms, SNAP / > 5 m /
-##   epoch change teleport, other corrections blend over 150 ms, SLEEP exact.
+##   Hermite / slerp between ring states, extrapolation for about one update
+##   interval (Interp.extrap_cap), SNAP / > 5 m / epoch change teleport, SLEEP exact.
+##   Corrections: when new data arrives (the ring changed, never a velocity
+##   guess) the drawn pose - position and rotation - blends into the new curve
+##   over 150 ms. A running blend is restarted only when the new error is
+##   larger than what is left of it; a smaller one is folded in and the blend
+##   still ends on time, so corrections always reach zero.
+## Release (P8): set_local_sim(on) clears the ring (no pre-grab state is ever
+## drawn again); after the carry the body stays locally simulated until the
+## render time passes the first record of the new epoch, then the host stream
+## is drawn ahead of rt by the local pose's lead (fading out), so a throw never
+## rubber-bands backwards. No such record in time: the local pose is kept.
 ## Frames for an unknown eid wait 500 ms for the spawn (orphan_frames after);
 ## despawned eids are tombstoned for 5 s. A full pool keeps the eid pending and
 ## retries every 0.5 s (client_pool_full). D22: small products (mass <= 2 kg)
@@ -32,7 +42,18 @@ const DRIVE_IDLE_MS := 2000
 const BLEND_MS := 150.0
 const SNAP_ERR := 5.0
 const JUMP_EPS := 0.02
+const ROT_EPS := 0.01             # rad (about 0.6 deg): smaller rotation errors are not blended
 const RELEASE_WAIT_MS := 1000
+const RELEASE_GIVEUP_MS := 2000   # past RELEASE_WAIT_MS: no host record at all, the local pose stays
+const LEAD_MAX_MS := 400          # release lead: at most interp_delay (200) + one-way latency
+const LEAD_FADE_MS := 1000        # the lead fades to 0 over this (time runs >= 60 % speed)
+const LEAD_MIN_SPEED := 0.5       # m/s: slower releases need no lead
+const STATS_MS := 1000            # client stats into counters (cl_*)
+const FRAME_WINDOW := 600         # frame times kept for p95 / max (10 s at 60 fps)
+const STALE_WINDOW := 2048        # staleness samples kept for p95
+const STALE_EVERY := 6            # physics frames between staleness samples (10 Hz)
+const STALE_RADIUS := 10.0        # MP2-DESIGN 8: bodies within 10 m of the local player
+const STALE_SPEED := 0.5          # moving faster than 0.5 m/s
 const D22_MASS := 2.0
 const NETQ_MS := 1000
 const VERIFY_PER_FRAME := 64
@@ -71,7 +92,53 @@ var q_late := 0
 var counters := {"puppets_spawned": 0, "puppets_despawned": 0, "frames_rx": 0, "records_rx": 0,
 	"orphan_frames": 0, "orphans_adopted": 0, "late_frames": 0, "client_pool_full": 0, "puppet_unfreeze": 0,
 	"fixture_mismatch": 0, "snaps": 0, "blends": 0, "decode_errors": 0, "wsnap_rows": 0, "wsnap_rejected": 0,
-	"frames_gaps": 0, "puppet_lost": 0, "riders_on": 0, "riders_off": 0}
+	"frames_gaps": 0, "puppet_lost": 0, "riders_on": 0, "riders_off": 0, "release_kept_local": 0}
+var _drv: Dictionary = {}         # eid -> Drive (see below)
+# client stats (P1): frame times, staleness; published into counters every STATS_MS
+var _ft := PackedFloat32Array()   # ms between rendered frames, ring of FRAME_WINDOW
+var _ft_i := 0
+var _last_frame := -1
+var _last_frame_us := 0
+var _frame_hooked := false        # _sample_frame runs on SceneTree.process_frame (every rendered frame)
+var _stale := PackedInt32Array()  # ms since the last record, ring of STALE_WINDOW
+var _stale_i := 0
+var _stale_k := 0
+var _stats_ms := 0
+
+
+## Per-puppet driving state (kept here, beside PuppetBody): what _drive saw of
+## the ring last frame, the rotation correction, the release lead.
+class Drive:
+	var first_t := -1             # ring signature: a successful push changes one of these
+	var last_t := -1
+	var size := 0
+	var out_q := Quaternion.IDENTITY   # rotation drawn last frame
+	var out_w := Vector3.ZERO     # angular velocity of the curve last frame (Interp w)
+	var rc := Vector3.ZERO        # rotation correction (axis * angle, world), on corr0's clock
+	var still := false            # the last write was a still pose (before / hold / sleep, no blend)
+	var writes := 0               # transform writes (a still pose is written once, see _drive)
+	var lead_ms := 0              # release lead at lead_start_ms
+	var lead_start_ms := 0
+	var pregrab: Dictionary = {}  # the newest state when the ring was cleared (a deny hands back to it)
+
+	## True when the ring changed since the last call (new data).
+	func ring_changed(ring: Array) -> bool:
+		var f := int(ring[0].t) if not ring.is_empty() else -1
+		var l := int(ring[ring.size() - 1].t) if not ring.is_empty() else -1
+		var changed := f != first_t or l != last_t or ring.size() != size
+		first_t = f
+		last_t = l
+		size = ring.size()
+		return changed
+
+	func lead(now: int) -> int:
+		if lead_ms <= 0:
+			return 0
+		var k := 1.0 - float(now - lead_start_ms) / LEAD_FADE_MS
+		if k <= 0.0:
+			lead_ms = 0
+			return 0
+		return roundi(float(lead_ms) * k)
 
 
 func _init(p_bodies = null, p_pool_ids: Array = []) -> void:
@@ -309,6 +376,7 @@ func _forget_puppet(pb: PuppetBody) -> void:
 		pb.rider_of = 0
 	puppets.erase(pb.eid)
 	active.erase(pb.eid)
+	_drv.erase(pb.eid)
 	if pb.kind == "pooled":
 		_pooled_n = maxi(0, _pooled_n - 1)
 		var n := pb.node()
@@ -363,6 +431,7 @@ func clear() -> void:
 	puppets.clear()
 	active.clear()
 	carriers.clear()
+	_drv.clear()
 	_by_node.clear()
 	_pooled_n = 0
 	_rr_keys.clear()
@@ -481,6 +550,11 @@ func physics_step() -> void:
 	var now := _now()
 	var dt := clampf(float(now - _last_drive_ms) / 1000.0, 0.0, 0.1) if _last_drive_ms > 0 else 1.0 / 60.0
 	_last_drive_ms = now
+	if not _frame_hooked:
+		_hook_frames()
+	if now - _stats_ms >= STATS_MS:
+		_stats_ms = now
+		_publish_stats()
 	_expire(now)
 	if applying:
 		_apply_batch()
@@ -490,6 +564,8 @@ func physics_step() -> void:
 		_carry_riders()
 	var rt := _host_now() - interp_delay
 	var done: Array = []
+	_stale_k += 1
+	var me: Node3D = _stale_origin() if _stale_k % STALE_EVERY == 0 else null
 	for eid in active:
 		var pb: PuppetBody = puppets.get(eid, null)
 		var node: Node3D = pb.node() if pb != null else null
@@ -514,6 +590,8 @@ func physics_step() -> void:
 			done.append(eid)
 	for eid in done:
 		active.erase(eid)
+	if me != null:
+		_sample_stale_all(me, now)
 	_verify_some()
 
 
@@ -559,13 +637,40 @@ func _assert_frozen(node: Node) -> void:
 		node.freeze = true
 
 
+func _drive_of(pb: PuppetBody) -> Drive:
+	var d: Drive = _drv.get(pb.eid, null)
+	if d == null:
+		d = Drive.new()
+		var n := pb.node()
+		if n != null:
+			d.out_q = n.global_basis.get_rotation_quaternion()
+		_drv[pb.eid] = d
+	return d
+
+
+## What is left of the running blend, 1 -> 0 over BLEND_MS (0: none running).
+func _blend_k(pb: PuppetBody, d: Drive, now: int) -> float:
+	if pb.corr0 == Vector3.ZERO and d.rc == Vector3.ZERO:
+		return 0.0
+	var k := 1.0 - float(now - pb.corr_start_ms) / BLEND_MS
+	if k <= 0.0:
+		pb.corr0 = Vector3.ZERO
+		d.rc = Vector3.ZERO
+		return 0.0
+	return minf(k, 1.0)
+
+
 func _drive(pb: PuppetBody, node: Node3D, rt: int, dt: float, now: int) -> void:
-	var s := Interp.sample(pb.ring, rt)
+	var d := _drive_of(pb)
+	var lead := d.lead(now)
+	var s := Interp.sample(pb.ring, rt + lead, lead)
 	if s.is_empty():
 		return
 	var target: Vector3 = s.p
+	var tq: Quaternion = s.q
 	var mode := String(s.mode)
 	var newest := pb.newest()
+	var fresh := d.ring_changed(pb.ring)
 	var snap := pb.force_snap or not pb.has_out
 	if pb.was_snap_wait and mode != "snap_wait":
 		snap = true            # the teleport record became current
@@ -576,34 +681,60 @@ func _drive(pb: PuppetBody, node: Node3D, rt: int, dt: float, now: int) -> void:
 	pb.last_epoch = ep
 	if not snap and pb.out_p.distance_to(target) > SNAP_ERR:
 		snap = true
+	var running := pb.corr0 != Vector3.ZERO or d.rc != Vector3.ZERO
+	# what was left of the blend last frame, and what is left now
+	var kp := minf(1.0, 1.0 - float(now - pb.corr_start_ms) / BLEND_MS + dt * 1000.0 / BLEND_MS) if running else 0.0
+	var k := _blend_k(pb, d, now)
 	if snap:
 		pb.corr0 = Vector3.ZERO
+		d.rc = Vector3.ZERO
+		d.lead_ms = 0
+		k = 0.0
 		pb.force_snap = false
 		counters.snaps += 1
-	else:
-		var predicted := pb.prev_target + pb.prev_vel * dt
-		if (target - predicted).length() > JUMP_EPS:
-			# new data bent the curve: blend from where the puppet is drawn now
-			pb.corr0 = pb.out_p - target
+	elif fresh:
+		# new data: the curve moved under the drawn pose. The error is measured
+		# from where the puppet would be drawn this frame on the old curve (the
+		# last drawn pose moved on by its velocity, so it never stops for a
+		# frame); only data, never a velocity guess, starts a blend.
+		var e := pb.out_p + pb.prev_vel * dt - target
+		var er := Interp.rotvec(Interp.rotate(d.out_q, d.out_w, roundi(dt * 1000.0)) * tq.inverse())
+		if k > 0.0 and kp > 0.0 and e.length() <= (pb.corr0 * kp).length() + 0.001 \
+				and er.length() <= (d.rc * kp).length() + 0.001:
+			# no larger than what was left: fold it in, the blend ends on time
+			pb.corr0 = e / kp
+			d.rc = er / kp
+		elif (running and k > 0.0) or e.length() > JUMP_EPS or er.length() > ROT_EPS:
+			pb.corr0 = e
+			d.rc = er
 			pb.corr_start_ms = now
+			k = 1.0
 			counters.blends += 1
-	var corr := Vector3.ZERO
-	if pb.corr0 != Vector3.ZERO:
-		var k := 1.0 - float(now - pb.corr_start_ms) / BLEND_MS
-		if k <= 0.0:
-			pb.corr0 = Vector3.ZERO
-		else:
-			corr = pb.corr0 * k
-	var out := target + corr
+	var out := target + pb.corr0 * k
+	var oq := (Interp.from_rotvec(d.rc * k) * tq).normalized() if k > 0.0 else tq
+	d.out_w = s.w
+	var blending := k > 0.0
+	var still := not blending and d.lead_ms <= 0 and (mode == "before" or mode == "hold" or mode == "sleep")
+	# unchanged also needs the node still where it was put: game code may move a
+	# frozen kinematic body (scripted), and a still pose is not rewritten otherwise
+	var unchanged := still and d.still and not snap and out == pb.out_p and oq == d.out_q \
+			and node.global_position.is_equal_approx(out) \
+			and absf(node.global_basis.get_rotation_quaternion().dot(oq)) > 0.999999   # q and -q: one rotation
+	d.still = still
 	pb.prev_target = target
-	pb.prev_vel = s.v
+	pb.prev_vel = s.v          # the curve's own derivative (Interp), zero when it stands still
 	pb.out_p = out
+	d.out_q = oq
 	pb.has_out = true
-	node.global_transform = Transform3D(Basis(s.q as Quaternion).scaled(node.global_basis.get_scale()), out)
+	if not unchanged:
+		# a still pose (before / hold / sleep) is written once, not every frame;
+		# written again only when game code moved the node off it
+		d.writes += 1
+		node.global_transform = Transform3D(Basis(oq).scaled(node.global_basis.get_scale()), out)
 	if snap:
 		# a teleport: no interpolated streak from the old pose (physics interpolation is on)
 		node.reset_physics_interpolation()
-	if mode == "sleep" and pb.corr0 == Vector3.ZERO:
+	if mode == "sleep" and not blending:
 		pb.idle = true         # exact rest pose; nothing to do until the next record
 
 
@@ -624,6 +755,17 @@ func set_local_sim(eid: int, on: bool, min_epoch: int) -> void:
 			pb.rider_of = 0
 		pb.local_sim = true
 		pb.release_wait = false
+		# P8: the host sends nothing of a body to its owner, so whatever the ring
+		# holds now is pre-grab; it must never be drawn after a carry. The newest
+		# state is kept aside for a grab that ends in the same epoch (deny, undo):
+		# the host never moved the body and may send nothing more while it sleeps.
+		var keep := pb.newest()
+		pb.ring.clear()
+		pb.last_epoch = -1
+		pb.corr0 = Vector3.ZERO
+		_drv.erase(eid)
+		if not keep.is_empty():
+			_drive_of(pb).pregrab = keep
 		_remove_exception(pb)
 		if node is RigidBody3D:
 			node.freeze = false
@@ -639,33 +781,87 @@ func set_local_sim(eid: int, on: bool, min_epoch: int) -> void:
 	_check_release(pb, _now())
 
 
+## Host ms of the oldest ring record the release can hand over to: one of the
+## new epoch, or after RELEASE_WAIT_MS any record (a release the host ignored
+## never bumps the epoch; every record in the ring is post-grab). -1: none yet.
+func _handoff_t(pb: PuppetBody, any_epoch: bool) -> int:
+	for s in pb.ring:
+		if any_epoch or PuppetBody.epoch_reached(int(s.get("epoch", 0)), pb.min_epoch):
+			return int(s.t)
+	return -1
+
+
+## The released body stays locally simulated (what the player threw keeps
+## flying) until the render time passes the first record it can hand over to;
+## then it becomes a puppet again (P8, see header).
 func _check_release(pb: PuppetBody, now: int) -> void:
-	var reached := pb.has_epoch_at_least(pb.min_epoch)
-	if not reached and now < pb.release_until_ms:
-		return
+	var d0: Drive = _drv.get(pb.eid, null)
+	if d0 != null and not d0.pregrab.is_empty() and _handoff_t(pb, false) < 0 \
+			and PuppetBody.epoch_reached(int(d0.pregrab.get("epoch", 0)), pb.min_epoch):
+		# a grab that ended in its own epoch (deny, undo): the pre-grab state is
+		# still the host's pose. A carry asks for epoch + 1 and never gets here.
+		Interp.ring_push(pb.ring, d0.pregrab)
+		d0.pregrab = {}
+	var late := now >= pb.release_until_ms
+	var t0 := _handoff_t(pb, late)
+	var rt := _host_now() - interp_delay
+	if t0 < 0 or rt <= t0:
+		if now < pb.release_until_ms + RELEASE_GIVEUP_MS or (t0 >= 0 and not late):
+			return
 	pb.local_sim = false
 	pb.release_wait = false
 	var node := pb.node()
 	if node == null:
 		return
 	var local_p: Vector3 = node.global_position
+	var local_q: Quaternion = node.global_basis.get_rotation_quaternion()
 	puppetize(pb)
 	pb.idle = false
-	if reached:
-		# blend from the local pose over 150 ms
-		var s := Interp.sample(pb.ring, _host_now() - interp_delay)
-		if not s.is_empty():
-			pb.prev_target = s.p
-			pb.prev_vel = s.v
-			pb.out_p = local_p
-			pb.corr0 = local_p - (s.p as Vector3)
-			pb.corr_start_ms = now
-			pb.has_out = true
-			pb.last_epoch = int(pb.newest().get("epoch", 0))
-			if pb.corr0.length() > SNAP_ERR:
-				pb.corr0 = Vector3.ZERO
-	else:
-		pb.force_snap = true     # no record of the new epoch in time: the host state wins
+	var d := _drive_of(pb)
+	d.out_q = local_q
+	d.out_w = Vector3.ZERO
+	d.still = false
+	pb.out_p = local_p
+	pb.prev_vel = Vector3.ZERO
+	pb.has_out = true
+	pb.force_snap = false
+	pb.corr0 = Vector3.ZERO
+	d.rc = Vector3.ZERO
+	d.lead_ms = 0
+	d.pregrab = {}
+	if t0 < 0:
+		# nothing from the host in time: keep the local pose (never a pre-grab
+		# one); the next record blends from here, whatever its epoch
+		pb.last_epoch = -1
+		counters.release_kept_local += 1
+		return
+	while pb.ring.size() > 1 and int(pb.ring[0].t) < t0:
+		pb.ring.pop_front()        # records older than the hand-over are pre-release
+	pb.last_epoch = int(pb.newest().get("epoch", 0))
+	var s := Interp.sample(pb.ring, rt)
+	if s.is_empty():
+		return
+	# the host's copy started from our release state one way later and is drawn
+	# interp_delay behind: draw its stream ahead by the local pose's lead and
+	# let the lead fade, so the body slows briefly instead of jumping back
+	var v: Vector3 = s.v
+	if v.length() >= LEAD_MIN_SPEED:
+		var lead_s := (local_p - (s.p as Vector3)).dot(v) / v.length_squared()
+		d.lead_ms = clampi(roundi(lead_s * 1000.0), 0, LEAD_MAX_MS)
+		d.lead_start_ms = now
+		if d.lead_ms > 0:
+			s = Interp.sample(pb.ring, rt + d.lead_ms, d.lead_ms)
+	d.ring_changed(pb.ring)
+	pb.prev_vel = s.v
+	pb.corr0 = local_p - (s.p as Vector3)
+	d.rc = Interp.rotvec(local_q * (s.q as Quaternion).inverse())
+	d.out_w = s.w
+	pb.corr_start_ms = now
+	if pb.corr0.length() > SNAP_ERR:
+		pb.force_snap = true
+		pb.corr0 = Vector3.ZERO
+		d.rc = Vector3.ZERO
+		d.lead_ms = 0
 
 
 # ================================================================== riders (0.2.2)
@@ -896,6 +1092,105 @@ func _expire(now: int) -> void:
 				tombs.erase(eid)
 
 
+## Client stats (P1), every STATS_MS into counters, so the `mp stats` line and
+## dump() carry them (bodies.counters() copies every key):
+##   cl_frame_p95_ms / cl_frame_max_ms: time between rendered frames
+##     (SceneTree.process_frame, not physics steps) over the last FRAME_WINDOW frames
+##   cl_physics_load: physics process time per tick x tick rate (1.0 = the tick budget)
+##   cl_phys_active: Performance PHYSICS_3D_ACTIVE_OBJECTS
+##   cl_stale_p95_ms / cl_stale_n: now - last record for puppets within 10 m of
+##     the local player whose newest record moves faster than 0.5 m/s, sampled
+##     over every puppet (driven or not, so a starved body past DRIVE_IDLE_MS
+##     still counts) (MP2-DESIGN 8: p95 <= 150 ms)
+##   cl_active: puppets driven this frame
+func stats() -> Dictionary:
+	var ft := Array(_ft)
+	ft.sort()
+	var st := Array(_stale)
+	st.sort()
+	var pl := 0.0
+	if bodies != null and bodies.get("adapter") != null and bodies.adapter.has_method("physics_load"):
+		pl = float(bodies.adapter.physics_load())
+	return {"cl_frame_p95_ms": snappedf(_pct(ft, 0.95), 0.1), "cl_frame_max_ms": snappedf(ft.back() if not ft.is_empty() else 0.0, 0.1),
+		"cl_physics_load": snappedf(pl, 0.01),
+		"cl_phys_active": int(Performance.get_monitor(Performance.PHYSICS_3D_ACTIVE_OBJECTS)),
+		"cl_stale_p95_ms": int(_pct(st, 0.95)), "cl_stale_n": st.size(), "cl_active": active.size()}
+
+
+static func _pct(sorted: Array, q: float) -> float:
+	if sorted.is_empty():
+		return 0.0
+	return float(sorted[clampi(int(float(sorted.size()) * q), 0, sorted.size() - 1)])
+
+
+func _publish_stats() -> void:
+	var st := stats()
+	for k in st:
+		counters[k] = st[k]
+
+
+## Connects _sample_frame to SceneTree.process_frame once, so every rendered
+## frame is sampled, also the ones that run no physics step (render rate above
+## the tick rate). Without a tree (never in game) nothing is sampled. Freeing
+## the replicator drops the connection with it.
+func _hook_frames() -> void:
+	_frame_hooked = true
+	var tree := Engine.get_main_loop() as SceneTree
+	if tree != null and not tree.process_frame.is_connected(_sample_frame):
+		tree.process_frame.connect(_sample_frame)
+
+
+## Time between rendered frames (one sample per process frame).
+func _sample_frame() -> void:
+	var f := Engine.get_process_frames()
+	if f == _last_frame:
+		return
+	var us := Time.get_ticks_usec()
+	if _last_frame >= 0:
+		var ms := float(us - _last_frame_us) / 1000.0
+		if _ft.size() < FRAME_WINDOW:
+			_ft.append(ms)
+		else:
+			_ft[_ft_i] = ms
+			_ft_i = (_ft_i + 1) % FRAME_WINDOW
+	_last_frame = f
+	_last_frame_us = us
+
+
+func _stale_origin() -> Node3D:
+	if bodies == null or bodies.get("adapter") == null or not bodies.adapter.has_method("local_player"):
+		return null
+	var p = bodies.adapter.local_player()
+	return p if p is Node3D and (p as Node3D).is_inside_tree() else null
+
+
+## Staleness over every puppet a viewer would see move: not only the active
+## set, which drops a body DRIVE_IDLE_MS after its last record (that cut-off
+## would cap the statistic in exactly the starvation it is meant to show).
+func _sample_stale_all(me: Node3D, now: int) -> void:
+	for eid in puppets:
+		var pb: PuppetBody = puppets[eid]
+		if pb == null or pb.local_sim or pb.hidden or pb.ring.is_empty():
+			continue
+		var node := pb.node()
+		if node != null:
+			_sample_stale(pb, node, me, now)
+
+
+func _sample_stale(pb: PuppetBody, node: Node3D, me: Node3D, now: int) -> void:
+	var s := pb.newest()
+	if s.is_empty() or int(s.flags) & Codec.RF_SLEEP or (s.l as Vector3).length_squared() < STALE_SPEED * STALE_SPEED:
+		return
+	if node.global_position.distance_squared_to(me.global_position) > STALE_RADIUS * STALE_RADIUS:
+		return
+	var ms := now - pb.last_rx_ms
+	if _stale.size() < STALE_WINDOW:
+		_stale.append(ms)
+	else:
+		_stale[_stale_i] = ms
+		_stale_i = (_stale_i + 1) % STALE_WINDOW
+
+
 ## netq (MP2 2.4), every second, ch0
 func netq_due(now: int) -> bool:
 	if now - _last_netq_ms < NETQ_MS:
@@ -907,7 +1202,10 @@ func netq_due(now: int) -> bool:
 func take_netq() -> Dictionary:
 	# a reordered packet first counted as a gap (5, 7, 6: the 7 adds 1) arrives late: not lost
 	var d := {"rx_pkts": q_rx_pkts, "gaps": maxi(0, q_gaps - q_late), "late": q_late, "interp_ms": interp_delay,
-		"puppets": puppets.size(), "active": active.size()}
+		"puppets": puppets.size(), "active": active.size(),
+		# P1: what the host cannot see (extra keys; older hosts ignore them)
+		"frame_p95_ms": counters.get("cl_frame_p95_ms", 0.0), "stale_p95_ms": counters.get("cl_stale_p95_ms", 0),
+		"physics_load": counters.get("cl_physics_load", 0.0)}
 	q_rx_pkts = 0
 	q_gaps = 0
 	q_late = 0

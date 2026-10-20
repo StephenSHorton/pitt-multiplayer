@@ -6,9 +6,13 @@ extends Node3D
 ## The transmitted position is the PlayerController origin, which is the centre
 ## of the player's capsule (standing height 1.95, camera pivot +0.65), so the
 ## body is centred on the origin and the face plate sits at eye height.
-## Interpolation: rendered at host_now - 100 ms from a buffer of frames (position
-## lerped, yaw/pitch lerp_angle); up to 250 ms of velocity extrapolation, then
-## hold; snap on `teleported` or a jump over 5 m; hidden after 3 s without frames.
+## Interpolation: rendered at host_now - interp_delay from a buffer of frames
+## (position lerped, yaw/pitch lerp_angle); up to 250 ms of velocity
+## extrapolation, then hold; snap on `teleported` or a jump over 5 m; hidden
+## after 3 s without frames. interp_delay is 100 ms, or more when the frames
+## arrive later than that (MP2 3.4 Interp.delay_for over the frames' lateness
+## and jitter plus the 50 ms send spacing; needs `clock`), so a slow link
+## interpolates instead of living in extrapolation.
 ## Near-camera fade: body and face plate fade out from FADE_FAR to NEAR_HIDE
 ## metres (camera to the capsule axis) and are hidden inside NEAR_HIDE, so a
 ## puppet never fills the local view; the name label always stays.
@@ -18,7 +22,10 @@ const PALETTE := [Color(0.95, 0.75, 0.15), Color(0.25, 0.65, 0.95), Color(0.9, 0
 	Color(0.6, 0.6, 0.65), Color(0.55, 0.75, 0.3)]
 const GOLD := Color(0.969, 0.729, 0.078)
 const FONT_PATH := "res://assets/PublicPixel-rv0pA.ttf"
-const INTERP_DELAY_MS := 100
+const Interp = preload("bodies/interp.gd")
+
+const INTERP_DELAY_MS := 100       # the floor of interp_delay
+const SEND_SPACING_EXTRA_MS := 17  # avatars.gd sends every 50 ms; delay_for allows for 33
 const MAX_EXTRAP_MS := 250
 const SNAP_DISTANCE := 5.0
 const HIDE_AFTER_MS := 3000
@@ -47,6 +54,10 @@ var visor: MeshInstance3D = null
 var label: Label3D = null
 var pitch := 0.0
 var frames_rx := 0
+var interp_delay := INTERP_DELAY_MS
+var _late_mean := 0.0        # EMA of host_now on arrival - t_ms
+var _late_jitter := 0.0
+var _late_init := false
 
 
 func _init() -> void:
@@ -135,6 +146,7 @@ func push(f: Dictionary, now_local_ms: int) -> void:
 	_last_seq = seq
 	_last_rx_ms = now_local_ms
 	frames_rx += 1
+	_update_delay(int(f.get("t_ms", 0)))
 	var teleported := (int(f.get("flags", 0)) & 32) != 0
 	if not _buf.is_empty():
 		var lastp: Vector3 = _buf.back().pos
@@ -145,6 +157,22 @@ func push(f: Dictionary, now_local_ms: int) -> void:
 	_buf.sort_custom(func(a, b): return int(a.t_ms) < int(b.t_ms))
 	while _buf.size() > BUFFER_MAX:
 		_buf.pop_front()
+
+
+## The same adaptive delay as body puppets (replicator_client._update_jitter),
+## plus the longer avatar send spacing; never under INTERP_DELAY_MS. Without a
+## host clock the lateness is unknown and the delay stays at the floor.
+func _update_delay(t_ms: int) -> void:
+	if not clock.is_valid():
+		return
+	var late := float(_now_host() - t_ms)
+	if not _late_init:
+		_late_init = true
+		_late_mean = late
+	else:
+		_late_mean += (late - _late_mean) * 0.05
+		_late_jitter += (absf(late - _late_mean) - _late_jitter) * 0.1
+	interp_delay = maxi(INTERP_DELAY_MS, Interp.delay_for(_late_jitter, _late_mean + SEND_SPACING_EXTRA_MS))
 
 
 func _now_host() -> int:
@@ -199,7 +227,7 @@ func update_pose(host_now: int, local_now: int) -> void:
 		visible = false
 		return
 	visible = local_now - _last_rx_ms <= HIDE_AFTER_MS
-	var rt := host_now - INTERP_DELAY_MS
+	var rt := host_now - interp_delay
 	var pose := sample(rt)
 	if _snap_next:
 		_snap_next = false
