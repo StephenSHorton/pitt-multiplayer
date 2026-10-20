@@ -677,7 +677,12 @@ The host's own player is peer 1: a host grab sets `{1, "held"}` so clients see `
    `2 × max_grab_distance + 1 m + |avatar velocity| × 0.15 s`, at most 9 m) to `bodies.host_follow_push`,
    which drives the kinematic follower 50 ms behind (not 100: the host copy interacts with the host world).
    Invalid frames are counted (`held_rejected`); 1.0 s of continuous distance violations revokes (`far`).
-5. **Other clients** see the body through normal host frames with `HELD` (priority weight 4.0).
+5. **Other clients** see the body through normal host frames with `HELD` (priority weight 4.0). A held
+   frame's velocity is the game carry's pull toward the hands (a full crate hanging still reads about
+   4 m/s), so those records (and the host's change gate) carry the motion of the last two held frames,
+   never faster than the sender's velocity (0.2.3). The state the host keeps for a release it decides
+   itself (`silence` / `far` revoke, teardown, a malformed `own_rel`) moves at that observed velocity
+   too; an owner's `own_rel` keeps the velocity it sent (the real throw).
 
 ### 5.3 Release and throw handoff
 
