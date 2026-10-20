@@ -312,10 +312,9 @@ Clean for 5 s → +15 % of the configured value per second up to it. Probe-up: q
 for 10 s at the configured value → +5 % of it per second up to a ceiling of 3× configured (at most
 400 KB/s, the host-wide upload cap); any queueing or loss above the configured value drops straight back
 to it and holds the probe off for 30 s; without a report in the last 2.5 s the probe does not step. On the
-host the Steam transport sets SteamNetworkingSockets' global SendRateMin/Max (same value) to the probe
+host the Steam transport sets SteamNetworkingSockets' global SendRateMax (the min stays Steam's, so its bandwidth estimate keeps working) to the probe
 ceiling + 64 KB/s only when that is above Steam's documented default of about 256 KB/s (in practice
-`high`: 352 KB/s), so Steam's pacing never sits below the ceiling and reliable bursts outside the budget are
-not paced faster than needed; it logs the value it set. Avatars (about 1 KB/s per player), econ and control
+`high`: 352 KB/s), so Steam's pacing never caps below the ceiling; it logs the value it set. Avatars (about 1 KB/s per player), econ and control
 are outside this budget.
 
 **Physics overload guard.** If `Performance.TIME_PHYSICS_PROCESS` exceeds 80 % of the 16.7 ms tick for 5 s,

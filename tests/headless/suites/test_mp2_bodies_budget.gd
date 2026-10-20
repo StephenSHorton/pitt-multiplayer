@@ -169,13 +169,13 @@ func test_single_peer_overload_keeps_bytes() -> void:
 
 func test_steam_send_rate_setter() -> void:
 	var s := SteamDouble.new()
-	assert_true(TransportSteam.apply_send_rate(s, 10, 11, 512000), "set through setGlobalConfigValueInt32")
-	assert_eq(s.calls, [[11, 512000], [10, 512000]], "max first, then min, same value")
+	assert_true(TransportSteam.apply_send_rate(s, 11, 512000), "set through setGlobalConfigValueInt32")
+	assert_eq(s.calls, [[11, 512000]], "only the max; Steam keeps its own min and estimate")
 	var bad := SteamDouble.new()
 	bad.result = false
-	assert_false(TransportSteam.apply_send_rate(bad, 10, 11, 512000), "a refused value reports false")
-	assert_false(TransportSteam.apply_send_rate(null, 10, 11, 512000), "no Steam singleton")
-	assert_false(TransportSteam.apply_send_rate(s, -1, 11, 512000), "constant missing (GodotSteam absent)")
+	assert_false(TransportSteam.apply_send_rate(bad, 11, 512000), "a refused value reports false")
+	assert_false(TransportSteam.apply_send_rate(null, 11, 512000), "no Steam singleton")
+	assert_false(TransportSteam.apply_send_rate(s, -1, 512000), "constant missing (GodotSteam absent)")
 	assert_eq(TransportSteam.steam_const("NETWORKING_CONFIG_SEND_RATE_MAX"), -1 if not ClassDB.class_exists("Steam") else
 		ClassDB.class_get_integer_constant("Steam", "NETWORKING_CONFIG_SEND_RATE_MAX"), "constants through ClassDB")
 	# the rate follows the host's tier and stays off Steam's default unless the tier needs more

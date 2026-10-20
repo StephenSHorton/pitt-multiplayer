@@ -27,11 +27,9 @@ extends "transport.gd"
 ## values NETWORKING_CONFIG_SEND_RATE_MIN / _MAX (both found in the bundled
 ## DLL's method binds and constant names). The global value is set before
 ## create_host / create_client, so every connection made after it inherits it.
-## Min and max get the same value (the Steamworks header advises setting both
-## to configure a send rate; we found no header in reach to confirm whether
-## this build estimates bandwidth between them). Because a fixed rate also
-## paces the reliable bursts outside the body budget (world-snapshot chunks),
-## it is raised only as far as the host's physics_detail needs: the probe
+## Only SendRateMax is raised: setting min to the same value would fix the rate
+## and turn off Steam's own bandwidth estimate, which then could not back off on
+## a slower link. The max is raised only as far as the host's physics_detail needs: the probe
 ## ceiling plus SEND_RATE_HEADROOM_BPS, and only when that is above the about
 ## 256 KB/s the Steamworks documentation gives as the default (in practice
 ## only "high", ceiling 288 KB/s). Below that Steam's own setting stays. The
@@ -79,8 +77,7 @@ func _init_relay() -> void:
 	if steam != null and steam.has_method("initRelayNetworkAccess"):
 		steam.initRelayNetworkAccess()
 	var want := send_rate_target(physics_detail, _applied_rate)
-	if want > 0 and want != _applied_rate and apply_send_rate(steam, steam_const("NETWORKING_CONFIG_SEND_RATE_MIN"),
-			steam_const("NETWORKING_CONFIG_SEND_RATE_MAX"), want):
+	if want > 0 and want != _applied_rate and apply_send_rate(steam, steam_const("NETWORKING_CONFIG_SEND_RATE_MAX"), want):
 		_applied_rate = want
 	# also when an earlier session in this process set it (still in force, logged again)
 	send_rate_bps = _applied_rate
@@ -107,15 +104,13 @@ static func steam_const(const_name: String) -> int:
 	return -1
 
 
-## Sets the global SendRateMin and SendRateMax on `steam` (the Steam singleton,
-## or a test double). True when both calls exist and both returned true.
-static func apply_send_rate(steam: Object, key_min: int, key_max: int, rate: int) -> bool:
-	if steam == null or key_min < 0 or key_max < 0 or not steam.has_method("setGlobalConfigValueInt32"):
+## Sets the global SendRateMax on `steam` (the Steam singleton, or a test
+## double); the min stays Steam's, so its bandwidth estimate keeps working.
+## True when the call exists and returned true.
+static func apply_send_rate(steam: Object, key_max: int, rate: int) -> bool:
+	if steam == null or key_max < 0 or not steam.has_method("setGlobalConfigValueInt32"):
 		return false
-	# max first: a min above the current max could be refused
-	var ok_max := bool(steam.call("setGlobalConfigValueInt32", key_max, rate))
-	var ok_min := bool(steam.call("setGlobalConfigValueInt32", key_min, rate))
-	return ok_max and ok_min
+	return bool(steam.call("setGlobalConfigValueInt32", key_max, rate))
 
 
 func _make_peer() -> MultiplayerPeer:
