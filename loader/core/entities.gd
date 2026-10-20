@@ -21,6 +21,14 @@ extends RefCounted
 ##      (a pooled node recycled and respawned between two reconciles, seen as a
 ##      hide -> show pair of visibility_changed, gets despawn + spawn, new id).
 ##   L9 entity.spawned carries reused: bool.
+## P10 (host CPU, MP2-DESIGN 3.2 L8): with full_every_frame on, the full diff
+## is gated. Every physics frame a cheap per-pool signature (active size plus the
+## instance id of the last active node; spawn appends there) is compared, and the
+## full diff runs only when it changed, when a watched pooled node changed
+## visibility or left the tree, when the registry changed outside a diff, on a
+## pending reuse, on force, or as a safety net every gated_full_interval (1 s).
+## gate_full_diff = false (PittAPI setting entity_reconcile_gate) restores the
+## literal full diff every frame.
 
 const META := "pittapi_eid"
 const FIRST_DYNAMIC_ID := 1000
@@ -41,6 +49,16 @@ var full_every_frame := false
 var detect_reuse := false
 var reuse_detected := 0
 var _vis: Dictionary = {}       # pooled entity id -> {cb: Callable, hid: bool, reused: bool}
+## P10 gate (see the header)
+var gate_full_diff := true
+var _gate_explicit := false     # a set_reconcile_mode call passed gate_full_diff
+var gated_full_interval := 1.0
+var full_diffs := 0             # full set diffs run (measurement)
+var reconcile_calls := 0        # reconcile() calls that reached the pools
+var _dirty := true
+var _sig := PackedInt64Array()
+var _reuse_pending := false
+var _vis_touched: Dictionary = {}   # ids whose hid/reused flags were set since the last clear
 
 
 func _init(core: Object = null) -> void:
@@ -267,13 +285,25 @@ func release(entity_id: int, source: String = "net") -> void:
 
 # ------------------------------------------------------------------ L8 reconcile mode
 
-## {full_every_frame: bool, detect_reuse: bool}; missing keys keep their value.
+## {full_every_frame: bool, detect_reuse: bool, gate_full_diff: bool}; missing
+## keys keep their value. gate_full_diff follows the PittAPI setting
+## entity_reconcile_gate (P10, the durable switch, re-read on each call) until a
+## call passes gate_full_diff explicitly; from then on the explicit value sticks
+## for the life of this registry, so a later plain {full_every_frame,
+## detect_reuse} call (bodies.gd host start and teardown) does not undo it.
 func set_reconcile_mode(mode: Dictionary) -> void:
+	var was := _watching()
 	full_every_frame = bool(mode.get("full_every_frame", full_every_frame))
-	var want := bool(mode.get("detect_reuse", detect_reuse))
-	if want == detect_reuse:
+	detect_reuse = bool(mode.get("detect_reuse", detect_reuse))
+	if mode.has("gate_full_diff"):
+		gate_full_diff = bool(mode.gate_full_diff)
+		_gate_explicit = true
+	elif not _gate_explicit and _core != null and _core.has_method("setting"):
+		gate_full_diff = bool(_core.setting("entity_reconcile_gate", true))
+	_dirty = true
+	var want := _watching()
+	if want == was:
 		return
-	detect_reuse = want
 	for id in _by_id.keys():
 		if String(_by_id[id].kind) != "pooled":
 			continue
@@ -281,6 +311,17 @@ func set_reconcile_mode(mode: Dictionary) -> void:
 			_watch_vis(id)
 		else:
 			_unwatch_vis(id)
+
+
+## P10: the full diff is gated on observed changes (host mode with the gate on).
+func _gated() -> bool:
+	return full_every_frame and gate_full_diff
+
+
+## Pooled nodes are watched (visibility_changed, tree_exiting) for L8 reuse
+## detection and for the P10 dirty flag.
+func _watching() -> bool:
+	return detect_reuse or _gated()
 
 
 func _watch_vis(id: int) -> void:
@@ -291,6 +332,8 @@ func _watch_vis(id: int) -> void:
 		return
 	var cb := _on_vis.bind(id)
 	n.visibility_changed.connect(cb)
+	if not n.tree_exiting.is_connected(_on_exit):
+		n.tree_exiting.connect(_on_exit)
 	_vis[id] = {"cb": cb, "hid": false, "reused": false}
 
 
@@ -301,19 +344,35 @@ func _unwatch_vis(id: int) -> void:
 	_vis.erase(id)
 	var e = _by_id.get(id, null)
 	var n = e.ref.get_ref() if e != null else null
-	if n != null and is_instance_valid(n) and n.visibility_changed.is_connected(v.cb):
-		n.visibility_changed.disconnect(v.cb)
+	if n != null and is_instance_valid(n):
+		if n.visibility_changed.is_connected(v.cb):
+			n.visibility_changed.disconnect(v.cb)
+		if n.tree_exiting.is_connected(_on_exit):
+			n.tree_exiting.disconnect(_on_exit)
 
 
+## A recycle hides the node and a spawn shows it (the pool's deactivate /
+## activate), so any visibility change marks the set dirty (P10).
 func _on_vis(id: int) -> void:
+	_dirty = true
+	if not detect_reuse:
+		return
 	var v = _vis.get(id, null)
 	var n = get_node(id)
 	if v == null or n == null:
 		return
 	if not bool(n.visible):
 		v.hid = true
+		_vis_touched[id] = true
 	elif bool(v.hid):
 		v.reused = true
+		_reuse_pending = true
+		_vis_touched[id] = true
+
+
+## A tracked pooled node freed or moved out of the tree (P10 dirty flag).
+func _on_exit() -> void:
+	_dirty = true
 
 
 ## True when the pooled node of `id` went hidden then visible since the last
@@ -325,17 +384,20 @@ func _was_reused(id: int, node: Node) -> bool:
 	return not (node.has_meta("in_cannon_barrel") or node.has_meta("in_vacuum_bag"))
 
 
+## O(1): set by _on_vis when a flag turns reused (P10; was a scan of _vis).
 func _any_reused() -> bool:
-	for id in _vis:
-		if bool(_vis[id].reused):
-			return true
-	return false
+	return _reuse_pending
 
 
+## Clears only the flags _on_vis set since the last clear (P10; was a scan of _vis).
 func _clear_vis_flags() -> void:
-	for id in _vis:
-		_vis[id].hid = false
-		_vis[id].reused = false
+	for id in _vis_touched:
+		var v = _vis.get(id, null)
+		if v != null:
+			v.hid = false
+			v.reused = false
+	_vis_touched.clear()
+	_reuse_pending = false
 
 
 ## Removes a pooled entity and emits entity.despawned.
@@ -420,11 +482,16 @@ func clear_all() -> void:
 	_by_id.clear()
 	_by_iid.clear()
 	_player_slots.clear()
+	_vis_touched.clear()
+	_reuse_pending = false
 	_last_total = -1
+	_sig = PackedInt64Array()
+	_dirty = true
 
 
 ## Pool reconciler. Cheap total-count check every physics frame; full set diff
-## when the total changed or every full_interval seconds.
+## when the total changed or every full_interval seconds. With full_every_frame
+## on: the P10 gate (header), or a full diff every frame when gate_full_diff is off.
 func reconcile(delta: float, force: bool = false) -> void:
 	if not can_allocate():
 		_clear_vis_flags()
@@ -437,17 +504,35 @@ func reconcile(delta: float, force: bool = false) -> void:
 	var pools = pm.get("_pools")
 	if typeof(pools) != TYPE_DICTIONARY:
 		return
-	force = force or full_every_frame or _any_reused()
+	reconcile_calls += 1
+	var gated := _gated()
+	force = force or _any_reused() or (full_every_frame and not gated)
 	_since_full += delta
 	var total := 0
+	var sig := PackedInt64Array()
 	for pid in pools:
 		var pool = pools[pid]
-		if pool != null:
-			total += pool.active.size()
-	if not force and total == _last_total and _since_full < full_interval:
-		return
+		if pool == null:
+			continue
+		var act = pool.active
+		total += act.size()
+		if gated:
+			# spawn appends: a same-size swap moves the last node (or shows a watched one)
+			var last = act[act.size() - 1] if act.size() > 0 else null
+			sig.append(act.size())
+			sig.append(last.get_instance_id() if is_instance_valid(last) else 0)
+	if not force:
+		if gated:
+			if not _dirty and sig == _sig and _since_full < gated_full_interval:
+				return
+		elif total == _last_total and _since_full < full_interval:
+			return
 	_last_total = total
+	_sig = sig
 	_since_full = 0.0
+	# cleared before the diff: a change made during it (an event handler) runs one more
+	_dirty = false
+	full_diffs += 1
 	var seen: Dictionary = {}
 	for pid in pools:
 		var pool = pools[pid]
@@ -482,7 +567,8 @@ func _put(id: int, node: Node, kind: String, pool_id: String, key: String, owner
 		"owner": owner, "iid": iid}
 	_by_iid[iid] = id
 	node.set_meta(META, id)
-	if detect_reuse and kind == "pooled":
+	_dirty = true
+	if kind == "pooled" and _watching():
 		_watch_vis(id)
 
 
@@ -491,6 +577,7 @@ func _forget(entity_id: int) -> void:
 	if e == null:
 		return
 	_unwatch_vis(entity_id)
+	_dirty = true
 	_by_id.erase(entity_id)
 	if int(_by_iid.get(e.iid, 0)) == entity_id:
 		_by_iid.erase(e.iid)

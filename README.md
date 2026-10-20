@@ -54,7 +54,7 @@ directly).
 | Game saves (`savegame.save`, `savegame_2..10.save`, `sandbox.save`, `.bak/.tmp/.corrupt`, `profile.cfg`) | `%APPDATA%\Godot\app_userdata\Project P.I.T.T\` (the game's `user://` root). The game uses no Steam Remote Storage calls; Steam **Auto-Cloud** syncs this folder (`steam_autocloud.vdf`, `remotecache.vdf`). |
 | PittAPI log (rotates at 2 MB, keeps 3) | `...\Project P.I.T.T\pittapi\pittapi.log` |
 | Mod states (LOADED / FAILED / DISABLED / QUARANTINED + reason) | `...\pittapi\status.json` |
-| Global settings | `...\pittapi\config\pittapi.cfg` (`log_level`, `dev_console`, `console_key`, `cheats_allowed`, `quarantine_threshold`, `quarantine_window_s`, `strict_game_version`) |
+| Global settings | `...\pittapi\config\pittapi.cfg` (`log_level`, `dev_console`, `console_key`, `cheats_allowed`, `quarantine_threshold`, `quarantine_window_s`, `strict_game_version`, `entity_reconcile_gate`) |
 | Enable/disable mods | `...\pittapi\mods.cfg`, section `[enabled]`, `ModId=false` |
 | Mod configs, keybinds, save sidecars | `...\pittapi\config\<id>.cfg`, `...\pittapi\keybinds.cfg`, `...\pittapi\saves\<save-key>\<id>.json` |
 
