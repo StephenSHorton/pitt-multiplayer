@@ -2,11 +2,12 @@ extends RefCounted
 ## Held-body stream, frame kind 5 (client -> host, ch2 unreliable;
 ## MP2-DESIGN 2.3, 5.2 step 4). The owner sends the exact local state of the
 ## body it carries at 30 Hz; the host validates each record (sender = owner,
-## kind held, epoch = current, within max_grab_distance + 2.5 m of the sender's
-## avatar) in ownership_host.gd.
+## kind held, epoch = current or 0 before the grant was seen, within the held
+## reach of the sender's avatar) in ownership_host.gd.
 ##
 ## Wire layout (little endian):
-##   header 8 B : u8 kind=5 | u8 0 | u16 count | u32 t_ms
+##   header 8 B : u8 kind=5 | u8 seq | u16 count | u32 t_ms
+##                (seq: the sender's frame counter mod 256, one per frame sent)
 ##   record 31 B: u32 eid | u16 epoch | i24 x,y,z (1/1024 m) | u32 rot (smallest three)
 ##                | i16 vx,vy,vz (1/100 m/s) | i16 wx,wy,wz (1/100 rad/s)
 ## t_ms is the sender's Session.host_now() (the MP1 clock estimate of the host
@@ -49,14 +50,14 @@ static func use_fallback(on: bool) -> void:
 
 
 ## records: [{eid, epoch, p: Vector3, q: Quaternion, l: Vector3, a: Vector3}]
-static func encode(t_ms: int, records: Array) -> PackedByteArray:
+static func encode(t_ms: int, records: Array, seq: int = 0) -> PackedByteArray:
 	var c := codec()
 	if c != null:
-		return c.call("encode_held", t_ms, records)
-	return encode_fallback(t_ms, records)
+		return c.call("encode_held", t_ms, records, seq)
+	return encode_fallback(t_ms, records, seq)
 
 
-## -> {t_ms, records:[{eid, epoch, p, q, l, a}]}, {} on any error
+## -> {t_ms, seq, records:[{eid, epoch, p, q, l, a}]}, {} on any error
 static func decode(bytes: PackedByteArray) -> Dictionary:
 	var c := codec()
 	if c != null:
@@ -65,16 +66,18 @@ static func decode(bytes: PackedByteArray) -> Dictionary:
 			return {}
 		if not d.has("t_ms"):
 			d["t_ms"] = int(d.get("client_ms", d.get("host_ms", 0)))
+		if not d.has("seq"):
+			d["seq"] = int(bytes[1])
 		return d
 	return decode_fallback(bytes)
 
 
-static func encode_fallback(t_ms: int, records: Array) -> PackedByteArray:
+static func encode_fallback(t_ms: int, records: Array, seq: int = 0) -> PackedByteArray:
 	var n := mini(records.size(), MAX_RECORDS)
 	var out := PackedByteArray()
 	out.resize(HEADER + RECORD * n)
 	out[0] = KIND
-	out[1] = 0
+	out[1] = seq & 0xFF
 	out.encode_u16(2, n)
 	out.encode_u32(4, t_ms & 0xFFFFFFFF)
 	var o := HEADER
@@ -118,7 +121,7 @@ static func decode_fallback(bytes: PackedByteArray) -> Dictionary:
 			"l": Vector3(bytes.decode_s16(o + 19), bytes.decode_s16(o + 21), bytes.decode_s16(o + 23)) / VEL_SCALE,
 			"a": Vector3(bytes.decode_s16(o + 25), bytes.decode_s16(o + 27), bytes.decode_s16(o + 29)) / VEL_SCALE})
 		o += RECORD
-	return {"t_ms": int(bytes.decode_u32(4)), "records": recs}
+	return {"t_ms": int(bytes.decode_u32(4)), "seq": int(bytes[1]), "records": recs}
 
 
 static func q_pos(v: float) -> int:
@@ -244,6 +247,7 @@ static func vec3_json(v: Vector3) -> Array:
 
 var paused := false            # test hook (G4): stop sending held frames
 var sent := 0
+var seq := 0                   # u8 header sequence of the next frame
 var _last_send_ms := -100000
 
 
@@ -256,7 +260,8 @@ func maybe_send(session: Object, now_ms: int, records: Array) -> PackedByteArray
 		return PackedByteArray()
 	_last_send_ms = now_ms
 	var t := int(session.host_now()) if session.has_method("host_now") else now_ms
-	var bytes := encode(t, records)
+	var bytes := encode(t, records, seq)
+	seq = (seq + 1) & 0xFF
 	if session.has_method("send_unreliable"):
 		session.send_unreliable(1, bytes)
 	sent += 1

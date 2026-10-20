@@ -471,13 +471,14 @@ static func decode_bodies(b: PackedByteArray) -> Dictionary:
 
 # ------------------------------------------------------------------ frame kind 5: held body (C->H)
 
-## records (<= 2): [{eid, epoch (u16), p, q, l, a}]
-static func encode_held(client_ms: int, records: Array) -> PackedByteArray:
+## records (<= 2): [{eid, epoch (u16), p, q, l, a}]. Header byte 1 is the
+## sender's u8 frame sequence (GRAB counts gaps; older senders write 0).
+static func encode_held(client_ms: int, records: Array, seq: int = 0) -> PackedByteArray:
 	var n := mini(records.size(), HELD_MAX)
 	var b := PackedByteArray()
 	b.resize(HELD_HEADER + n * HELD_RECORD)
 	b[0] = Proto.FRAME_HELD
-	b[1] = 0
+	b[1] = seq & 0xFF
 	b.encode_u16(2, n)
 	b.encode_u32(4, client_ms & 0xFFFFFFFF)
 	var o := HELD_HEADER
@@ -502,7 +503,7 @@ static func encode_held(client_ms: int, records: Array) -> PackedByteArray:
 	return b
 
 
-## -> {client_ms, records: [{eid, epoch, p, q, l, a}]}; {} on any error.
+## -> {client_ms, seq, records: [{eid, epoch, p, q, l, a}]}; {} on any error.
 static func decode_held(b: PackedByteArray) -> Dictionary:
 	if b.size() < HELD_HEADER or int(b[0]) != Proto.FRAME_HELD:
 		return {}
@@ -520,4 +521,4 @@ static func decode_held(b: PackedByteArray) -> Dictionary:
 			"l": Vector3(dq_vel(b.decode_s16(o + 19)), dq_vel(b.decode_s16(o + 21)), dq_vel(b.decode_s16(o + 23))),
 			"a": Vector3(dq_vel(b.decode_s16(o + 25)), dq_vel(b.decode_s16(o + 27)), dq_vel(b.decode_s16(o + 29)))})
 		o += HELD_RECORD
-	return {"client_ms": int(b.decode_u32(4)), "records": recs}
+	return {"client_ms": int(b.decode_u32(4)), "seq": int(b[1]), "records": recs}

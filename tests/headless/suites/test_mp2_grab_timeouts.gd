@@ -1,6 +1,6 @@
 extends "res://tests/test_case.gd"
 ## MP2 GRAB revocation and timeouts (MP2-DESIGN 5.4; 11.1 test_mp2_grab_protocol
-## revoke cases, G4): silence 1.5 s, frames keep a hold alive, far for 0.5 s,
+## revoke cases, G4): silence 1.5 s, frames keep a hold alive, far for 1.0 s,
 ## GAMEPLAY capture revokes, a client's released request with no answer.
 
 const Rig = preload("res://tests/fakes/mp2_grab/grab_rig.gd")
@@ -55,7 +55,7 @@ func test_frames_keep_the_hold_alive() -> void:
 	r.cleanup()
 
 
-func test_far_owner_revokes_after_500_ms() -> void:
+func test_far_owner_revokes_after_1000_ms() -> void:
 	var r := _held(1)
 	var c = r.c(0)
 	r.steps(5, 20)
@@ -63,8 +63,8 @@ func test_far_owner_revokes_after_500_ms() -> void:
 	c.grab.stream.paused = true
 	r.pose(c.id, Vector3(0, 0, 12))
 	var t0: int = r.net.clock_ms
-	r.steps(20, 20)                     # 400 ms
-	assert_eq(r.host.grab.hold_kind(DUCK), "held", "not before 0.5 s")
+	r.steps(45, 20)                     # 900 ms
+	assert_eq(r.host.grab.hold_kind(DUCK), "held", "not before 1.0 s")
 	r.steps(10, 20)
 	assert_eq(r.host.grab.hold_kind(DUCK), "", "revoked")
 	assert_eq(r.host.grab.counters().grab_revoke_reasons, {"far": 1}, "reason far")
@@ -78,7 +78,7 @@ func test_far_frames_count_and_revoke() -> void:
 	# the client streams poses 9 m away (desync / cheat): rejected, then revoked
 	var n: RigidBody3D = c.nodes[DUCK]
 	n.global_position = Vector3(0, 0.6, -9)
-	r.steps(40, 20)
+	r.steps(60, 20)                     # 1.2 s: past FAR_MS (1.0 s)
 	assert_true(int(r.host.grab.counters().held_rejected) >= 10, "far frames rejected")
 	assert_eq(r.host.grab.counters().grab_revoke_reasons, {"far": 1}, "revoked far")
 	r.cleanup()

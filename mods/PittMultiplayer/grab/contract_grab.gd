@@ -16,6 +16,7 @@ const ENTRIES := [
 	"mp2.grab|res://scripts/main_camera.gd|prop|equipped_item",
 	"mp2.grab|res://scripts/main_camera.gd|prop|max_grab_distance",
 	"mp2.grab|res://scripts/main_camera.gd|prop|interact_ray",
+	"mp2.grab|res://scripts/main_camera.gd|prop|_rack_basis",
 	"mp2.grab|res://scripts/main_camera.gd|method|_begin_carry",
 	"mp2.grab|res://scripts/main_camera.gd|method|drop_object",
 	"mp2.grab|res://scripts/main_camera.gd|method|release_held_object",

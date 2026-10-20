@@ -81,6 +81,9 @@ var modules: Array = []
 var poses: Dictionary = {}           # peer -> {ok, pos, eye, ...}
 var in_game: Array = []              # host: in-game client peers
 var raw_sent := 0
+## the real Session's last-packet table (peer -> clock ms); opt-in: empty means
+## "unknown" to GRAB's link-stall check, tests fill it to model a link
+var _last_rx: Dictionary = {}
 
 
 func _init(p_role: String = "host", p_peer: int = 1) -> void:

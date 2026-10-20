@@ -6,6 +6,9 @@ extends RefCounted
 ## The carry is predicted: _begin_carry runs at once (the body becomes local_sim),
 ## own_req goes to the host; a deny or revoke undoes it with the game's safe
 ## drop (release_held_object) without sending own_rel.
+## A host-originated grant with carry (rack withdraw, 6.11) starts the game's
+## carry itself once the granted puppet exists, whichever of the spawn and the
+## grant arrives first (GrabAdapter.carry_granted).
 
 const HeldStream = preload("held_stream.gd")
 const GrabAdapter = preload("../game/grab_adapter.gd")
@@ -28,9 +31,11 @@ var rows: Dictionary = {}
 var pend: Dictionary = {}
 var mine: Dictionary = {}
 var suppress: Dictionary = {}      # eid -> true: the next release of eid is ours (deny/revoke), no own_rel
-var want_carry: Dictionary = {}    # eid -> epoch: unsolicited grant with carry (rack), body not adopted yet
+var want_carry: Dictionary = {}    # eid -> epoch: unsolicited grant with carry (rack), carry not started yet
+var _carry_wait: Dictionary = {}   # eid -> epoch: GrabAdapter.carry_granted is waiting its settle frames
 var counters := {"requests": 0, "granted": 0, "denied": 0, "revoked": 0, "refused_local": 0, "rel_tx": 0,
-	"equip_tx": 0, "unequip_tx": 0, "undo_drops": 0, "pend_timeouts": 0}
+	"equip_tx": 0, "unequip_tx": 0, "undo_drops": 0, "pend_timeouts": 0, "carry_started": 0, "carry_busy": 0,
+	"carry_racked": 0}
 var refusals: Dictionary = {}
 
 
@@ -67,7 +72,7 @@ func local_refusal(eid: int, node: Node) -> String:
 		if String(r.kind) != "" and int(r.owner) != my_peer():
 			return "owned"
 	var bodies = grab.bodies()
-	if bodies != null and (int(bodies.flags_of(eid)) & FLAG_HELD) != 0:
+	if bodies != null and (int(bodies.flags_of(eid)) & FLAG_HELD) != 0 and not _held_flag_stale(eid):
 		return "held"
 	if GrabAdapter.busy_reason(node) != "":
 		return "busy"
@@ -78,6 +83,23 @@ func local_refusal(eid: int, node: Node) -> String:
 				if meta.has(m) and meta[m] != null and meta[m] != false:
 					return "busy"
 	return ""
+
+
+## The GRAB row is newer than the HELD flag of the newest body record: the row
+## says the body is free and that record's epoch (low byte) is not past the
+## row's epoch (a record still in flight from before the release, or a ring
+## entry that arrived out of order). The row wins; a record of a newer grant
+## (another peer took it, its `set` not here yet) keeps the flag.
+func _held_flag_stale(eid: int) -> bool:
+	if not rows.has(eid) or String(rows[eid].kind) != "":
+		return false
+	var bodies = grab.bodies()
+	var hs: Dictionary = bodies.host_state(eid) if bodies != null and bodies.has_method("host_state") else {}
+	if hs.is_empty():
+		return true
+	var rec_ep := int(hs.get("epoch", 0)) & 0xFF
+	var past := ((rec_ep - ((int(rows[eid].epoch) + 1) & 0xFF)) & 0xFF) < 128
+	return not past
 
 
 ## main_camera._begin_carry on a client. true = run the game's carry.
@@ -147,10 +169,9 @@ func on_own(msg: Dictionary) -> void:
 				mine[eid] = {"epoch": epoch, "kind": kind}
 				if bool(msg.get("carry", false)):
 					want_carry[eid] = epoch
-					var bodies = grab.bodies()
-					if bodies != null and bodies.node_of(eid) != null:
-						bodies.set_local_sim(eid, true)
 			_set_row(eid, owner, kind, epoch)
+			# the usual order: the spawn came first (flush_lifecycle before the grant)
+			_schedule_carry(eid)
 		"deny":
 			counters.denied += 1
 			pend.erase(eid)
@@ -163,6 +184,7 @@ func on_own(msg: Dictionary) -> void:
 			var had := mine.has(eid)
 			mine.erase(eid)
 			want_carry.erase(eid)
+			_carry_wait.erase(eid)
 			if had:
 				_undo_carry(eid)
 			_set_row(eid, owner, kind, epoch)
@@ -195,6 +217,70 @@ func _unsim(eid: int, min_epoch: int) -> void:
 	var bodies = grab.bodies()
 	if bodies != null and bodies.is_local_sim(eid):
 		bodies.set_local_sim(eid, false, min_epoch)
+
+
+# ------------------------------------------------------------------ granted carry (rack withdraw, 6.11)
+
+## want_carry + the adopted puppet: unfreeze it and let the adapter start the
+## game's carry after the settle frames. Called from both orderings (spawn
+## first: the grant itself; grant first: entity_added); runs once per grant.
+func _schedule_carry(eid: int) -> void:
+	if not want_carry.has(eid) or not mine.has(eid) or _carry_wait.has(eid):
+		return
+	var node := _node(eid) as RigidBody3D
+	if node == null:
+		return
+	var ep := int(want_carry[eid])
+	_carry_wait[eid] = ep
+	var bodies = grab.bodies()
+	if bodies != null:
+		bodies.set_local_sim(eid, true)
+	_run_granted_carry(eid, node, ep)
+
+
+func _run_granted_carry(eid: int, node: RigidBody3D, ep: int) -> void:
+	var res: String = await grab.adapter.carry_granted(grab.camera(), node,
+		func() -> bool: return _carry_still_wanted(eid, ep, node))
+	if int(_carry_wait.get(eid, -1)) == ep:
+		_carry_wait.erase(eid)
+	match res:
+		"carried":
+			counters.carry_started += 1
+		"busy":
+			_carry_busy(eid, ep, node)
+		_:
+			if int(want_carry.get(eid, -1)) == ep:
+				want_carry.erase(eid)
+
+
+func _carry_still_wanted(eid: int, ep: int, node: Node) -> bool:
+	return int(want_carry.get(eid, -1)) == ep and mine.has(eid) and _node(eid) == node and grab.ext_live()
+
+
+## The hands were full when the granted panel settled (the vanilla busy case
+## puts it back on the rack): rack_store it on the host through GAMEPLAY when
+## that is there, else release it where it is (own_rel), so the host never
+## waits for held frames that will not come.
+func _carry_busy(eid: int, ep: int, node: Node) -> void:
+	if int(want_carry.get(eid, -1)) == ep:
+		want_carry.erase(eid)
+	if not mine.has(eid):
+		return
+	counters.carry_busy += 1
+	if _rack_store(node):
+		counters.carry_racked += 1
+		return
+	on_release(eid, {"s": GrabAdapter.body_state(node)})
+
+
+## GAMEPLAY's client rack (duck-typed through the Session registry, like host_exec).
+func _rack_store(node: Node) -> bool:
+	var s = grab.session
+	var gp: Object = s.get_module("gameplay") if s != null and s.has_method("get_module") else null
+	var rack = gp.get("rack") if gp != null else null
+	if not (rack is Object) or not rack.has_method("client_store"):
+		return false
+	return bool(rack.client_store(node))
 
 
 func _carrying(eid: int) -> bool:
@@ -324,13 +410,12 @@ func entity_removed(eid: int) -> void:
 	pend.erase(eid)
 	mine.erase(eid)
 	want_carry.erase(eid)
+	_carry_wait.erase(eid)
 
 
+## BODIES adopted eid: a grant with carry that came before its spawn starts now.
 func entity_added(eid: int) -> void:
-	if want_carry.has(eid):
-		var bodies = grab.bodies()
-		if bodies != null:
-			bodies.set_local_sim(eid, true)
+	_schedule_carry(eid)
 
 
 func apply_wsnap_section(d: Dictionary) -> void:
@@ -346,3 +431,4 @@ func world_stopped() -> void:
 	mine.clear()
 	suppress.clear()
 	want_carry.clear()
+	_carry_wait.clear()

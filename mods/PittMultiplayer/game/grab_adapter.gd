@@ -13,6 +13,8 @@ const BUSY_GROUPS := ["terminal_pull"]
 const DEFAULT_MAX_GRAB := 3.5
 ## a throw sets player_throw_time at the release frame; older stamps are not this throw
 const THROW_FRESH_S := 0.5
+## physics frames a rack-withdrawn panel settles before the carry (main_camera.gd:958-960)
+const CARRY_SETTLE_FRAMES := 2
 
 var camera_override: Node = null
 
@@ -48,6 +50,46 @@ func max_grab_distance() -> float:
 		if typeof(v) in [TYPE_FLOAT, TYPE_INT] and float(v) > 0.0:
 			return float(v)
 	return DEFAULT_MAX_GRAB
+
+
+## Client, a host-originated grant with carry (rack withdraw, MP2-DESIGN 6.11):
+## the same settle wait the game gives a freshly spawned rack panel (two physics
+## frames), then the game's own carry with the hands kept and the panel turned
+## to the rack orientation the camera remembered. Never the game's
+## _carry_after_spawn: its busy branch pushes the pool id back on the local rack
+## and recycles the node, which on a client is a host-owned puppet.
+## still_wanted() -> bool is asked after the wait (the grant may be gone).
+## -> "carried" | "busy" (the hands hold something else; nothing was touched)
+##    | "gone" (node freed, grant gone, no camera, or the carry was refused).
+func carry_granted(cam: Node, node: RigidBody3D, still_wanted: Callable) -> String:
+	var tree: SceneTree = node.get_tree() if node != null and node.is_inside_tree() else Engine.get_main_loop() as SceneTree
+	if tree == null:
+		return "gone"
+	for i in CARRY_SETTLE_FRAMES:
+		await tree.physics_frame
+	if node == null or not is_instance_valid(node) or node.is_queued_for_deletion() or not node.is_inside_tree():
+		return "gone"
+	if still_wanted.is_valid() and not bool(still_wanted.call()):
+		return "gone"
+	if cam == null or not is_instance_valid(cam):
+		cam = camera()
+	if cam == null or not cam.has_method("_begin_carry"):
+		return "gone"
+	if picked(cam) != null or equipped(cam) != null:
+		return "busy"
+	cam._begin_carry(node, true)
+	if picked(cam) != node:
+		return "gone"
+	var rb = cam.get("_rack_basis")
+	if rb is Basis:
+		var xf := node.global_transform
+		xf.basis = rb
+		node.global_transform = xf
+	node.angular_velocity = Vector3.ZERO
+	var ray = cam.get("interact_ray")
+	if ray != null and is_instance_valid(ray) and ray.has_method("refresh_controls"):
+		ray.refresh_controls()
+	return "carried"
 
 
 ## The game's safe drop (main_camera.gd:982 -> drop_object(true)).
