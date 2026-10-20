@@ -48,20 +48,27 @@ func _rack_panel(panel: RigidBody3D) -> bool:
 	return super(panel)
 
 
-## Client: the host stores the panel (its world owns the rack); locally the
-## carry ends, the pickup sound plays and the control hints refresh.
+## Client: the host stores the panel (its world owns the rack, MP2 6.11). The
+## panel stays in the hands (hidden by the rack) until the host answers; only a
+## "stored" ends the carry, plays the pickup sound and refreshes the control
+## hints. A refusal or no answer leaves it carried, as the game's own full rack
+## does (the game shows no message for that either). true = the request went out
+## (the shared rack/interact key must not also interact this frame).
 func _mp_rack_on_host(panel: RigidBody3D) -> bool:
-	var stored := G.rack_store(panel)
-	if stored:
-		if picked_object == panel:
+	if G.gp == null or not ("rack" in G.gp) or G.gp.rack == null:
+		return false
+	return bool(G.gp.rack.client_store(panel, func(result: String) -> void:
+		if result != "stored" or not is_instance_valid(self):
+			return
+		# the host's revoke (another channel) may have ended the carry already
+		if is_instance_valid(panel) and picked_object == panel:
 			_release_carry_state()
 		var sfx = get("pickup_audio")
 		if sfx and sfx.stream:
 			sfx.play()
 		var ray = interact_ray
 		if ray:
-			ray.refresh_controls()
-	return stored
+			ray.refresh_controls()))
 
 
 func _refill_from_panel_stack() -> void:

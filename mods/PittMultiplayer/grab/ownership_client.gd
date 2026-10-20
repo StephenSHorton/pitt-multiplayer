@@ -35,7 +35,7 @@ var want_carry: Dictionary = {}    # eid -> epoch: unsolicited grant with carry 
 var _carry_wait: Dictionary = {}   # eid -> epoch: GrabAdapter.carry_granted is waiting its settle frames
 var counters := {"requests": 0, "granted": 0, "denied": 0, "revoked": 0, "refused_local": 0, "rel_tx": 0,
 	"equip_tx": 0, "unequip_tx": 0, "undo_drops": 0, "pend_timeouts": 0, "carry_started": 0, "carry_busy": 0,
-	"carry_racked": 0}
+	"carry_racked": 0, "carry_rack_refused": 0}
 var refusals: Dictionary = {}
 
 
@@ -260,27 +260,33 @@ func _carry_still_wanted(eid: int, ep: int, node: Node) -> bool:
 ## The hands were full when the granted panel settled (the vanilla busy case
 ## puts it back on the rack): rack_store it on the host through GAMEPLAY when
 ## that is there, else release it where it is (own_rel), so the host never
-## waits for held frames that will not come.
+## waits for held frames that will not come. The host's store revokes it
+## ("rack"); a refusal or no answer (rack.client_store) releases it then,
+## unless the grant is gone meanwhile.
 func _carry_busy(eid: int, ep: int, node: Node) -> void:
 	if int(want_carry.get(eid, -1)) == ep:
 		want_carry.erase(eid)
 	if not mine.has(eid):
 		return
 	counters.carry_busy += 1
-	if _rack_store(node):
+	if _rack_store(node, func(result: String) -> void:
+			if result == "stored" or int(mine.get(eid, {}).get("epoch", -1)) != ep or _node(eid) != node:
+				return
+			counters.carry_rack_refused += 1
+			on_release(eid, {"s": GrabAdapter.body_state(node)})):
 		counters.carry_racked += 1
 		return
 	on_release(eid, {"s": GrabAdapter.body_state(node)})
 
 
 ## GAMEPLAY's client rack (duck-typed through the Session registry, like host_exec).
-func _rack_store(node: Node) -> bool:
+func _rack_store(node: Node, on_answer: Callable) -> bool:
 	var s = grab.session
 	var gp: Object = s.get_module("gameplay") if s != null and s.has_method("get_module") else null
 	var rack = gp.get("rack") if gp != null else null
 	if not (rack is Object) or not rack.has_method("client_store"):
 		return false
-	return bool(rack.client_store(node))
+	return bool(rack.client_store(node, on_answer))
 
 
 func _carrying(eid: int) -> bool:

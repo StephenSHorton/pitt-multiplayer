@@ -871,7 +871,14 @@ values), `panel_stack` (the receiving peer's own stack, 6.11).
 ### 6.11 Panel rack (D13)
 
 `main_camera._try_rack_store` (:844) on a client → `rack_store {eid}` (the held panel): host recycles that
-entity and appends its pool id to the peer's host-side stack. `_try_withdraw_panel` (:863) /
+entity and appends its pool id to the peer's host-side stack. The client (`rack.client_store`) hides the
+panel but keeps carrying it until the command's result: `ok` ends the carry (pickup sound, control hints);
+a refusal (rack full, reach, held by someone else, ...) or no result within 2 s shows it again, still in the
+hands (the game's own full rack shows no message either); a late `ok` still ends the carry and hides it
+again. One request per panel at a time: a timed-out request stays open until its own result (the command
+deadline is longer than the 2 s wait), so a new press for that panel sends nothing, and in-flight or
+timed-out requests count against the capacity. The client never writes its
+`panel_stack` itself, so it always equals the host's stack. `_try_withdraw_panel` (:863) /
 `_refill_from_panel_stack` (:934) → `rack_withdraw {}`: host spawns the panel at the peer's rig hands and
 calls `grab.grant(eid, peer, "held", carry=true)`. The client starts the carry itself
 (`GrabAdapter.carry_granted`) once it has both the grant and the adopted puppet, in either order: two
@@ -879,7 +886,8 @@ physics frames to settle (as the game does), then the game's `_begin_carry(panel
 camera's `_rack_basis`. It never calls the game's `_carry_after_spawn` (:958): that one's busy branch pushes
 the pool id back on the local rack and recycles the node, which on a client is a host-owned puppet. If the
 hands are full by then, the client sends `rack_store` for the panel (GAMEPLAY's client rack), else releases
-it where it is (`own_rel`). The client's `GameState.panel_stack` is the mirrored field (HUD count via
+it where it is (`own_rel`); a refused or unanswered `rack_store` releases it then too (`carry_rack_refused`),
+unless the grant is gone by then. The client's `GameState.panel_stack` is the mirrored field (HUD count via
 `panel_stack_changed`).
 
 ### 6.12 Effects and achievements (`gameplay/fx.gd`)

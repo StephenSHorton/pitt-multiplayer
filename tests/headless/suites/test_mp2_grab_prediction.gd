@@ -201,11 +201,15 @@ func test_busy_player_releases_the_granted_panel() -> void:
 	r.cleanup()
 
 
+## GAMEPLAY's client rack as GRAB sees it: client_store(panel, on_answer) sends
+## and later answers "stored" | "refused" | "timeout" (gameplay/rack.gd).
 class FakeRack extends RefCounted:
 	var stored: Array = []
+	var answers: Array = []
 
-	func client_store(panel: Object) -> bool:
+	func client_store(panel: Object, on_answer: Callable = Callable()) -> bool:
 		stored.append(panel)
+		answers.append(on_answer)
 		return true
 
 
@@ -235,6 +239,62 @@ func test_busy_player_rack_stores_the_granted_panel() -> void:
 	assert_eq(int(c.grab.counters().grab_carry_racked), 1, "counted racked")
 	var rels: Array = r.net.q.filter(func(m): return m.get("k", "") == "own_rel" and int(m.msg.eid) == 1500)
 	assert_eq(rels.size(), 0, "no own_rel: the host's store revokes it")
+	# the host's "stored" changes nothing on the GRAB side (its revoke ends the row)
+	gp.rack.answers[0].call("stored")
+	r.steps(2)
+	rels = r.net.q.filter(func(m): return m.get("k", "") == "own_rel" and int(m.msg.eid) == 1500)
+	assert_eq(rels.size(), 0, "still no own_rel after stored")
+	r.cleanup()
+
+
+## Busy, and the host refuses the rack_store (or never answers): the panel is
+## released where it is (own_rel), so the host does not wait for the silence revoke.
+func test_busy_rack_store_refused_or_unanswered_releases_the_panel() -> void:
+	for answer in ["refused", "timeout"]:
+		var r := _rig(1)
+		var c = r.c(0)
+		var gp := FakeGameplay.new()
+		c.session.register_module(gp)
+		var panel := _panel(r)
+		c.bodies.add(1500, panel)
+		r.host.bodies.nodes[1500] = r.host.nodes[DUCK]
+		r.host.grab.grant(1500, c.id, "held", true)
+		r.deliver()
+		r.grab_body(c, DUCK)
+		r.as_peer(c)
+		await wait_physics(3)
+		assert_eq(gp.rack.stored, [panel], answer + ": rack_store sent")
+		gp.rack.answers[0].call(answer)
+		var rels: Array = r.net.q.filter(func(m): return m.get("k", "") == "own_rel" and int(m.msg.eid) == 1500)
+		assert_eq(rels.size(), 1, answer + ": own_rel for the panel")
+		assert_eq(int(c.grab.counters().grab_carry_rack_refused), 1, answer + ": counted")
+		assert_false(c.grab.is_mine(1500), answer + ": no longer mine")
+		assert_eq(c.cam.picked_object, c.nodes[DUCK], answer + ": the hands keep the duck")
+		r.deliver()
+		assert_eq(r.host.grab.hold_kind(1500), "", answer + ": host: the panel is free again")
+		r.cleanup()
+
+
+## The refusal comes after the host already revoked the grant: nothing to release.
+func test_busy_rack_refusal_after_revoke_sends_nothing() -> void:
+	var r := _rig(1)
+	var c = r.c(0)
+	var gp := FakeGameplay.new()
+	c.session.register_module(gp)
+	var panel := _panel(r)
+	c.bodies.add(1500, panel)
+	r.host.bodies.nodes[1500] = r.host.nodes[DUCK]
+	r.host.grab.grant(1500, c.id, "held", true)
+	r.deliver()
+	r.grab_body(c, DUCK)
+	r.as_peer(c)
+	await wait_physics(3)
+	r.host.grab.revoke(1500, "silence")
+	r.deliver()
+	gp.rack.answers[0].call("timeout")
+	var rels: Array = r.net.q.filter(func(m): return m.get("k", "") == "own_rel" and int(m.msg.eid) == 1500)
+	assert_eq(rels.size(), 0, "no own_rel for a revoked grant")
+	assert_eq(int(c.grab.counters().grab_carry_rack_refused), 0, "not counted")
 	r.cleanup()
 
 
