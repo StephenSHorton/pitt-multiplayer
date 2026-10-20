@@ -192,6 +192,17 @@ func test_full_mirror_and_pending_stores_refuse_locally() -> void:
 	assert_eq(s.auth.sent.size(), 1, "nothing more sent")
 	assert_true(cp2.visible, "the second panel untouched")
 	cam.free()
+	# a looked-at panel another player holds: refused locally, never hidden
+	var s3 := await _setup()
+	s3.c.grab.set_owner(EID, 3, "held")
+	s3.cam.picked_object = null
+	assert_false(s3.cam._rack_panel(s3.cp), "held by another player")
+	assert_eq(s3.auth.sent.size(), 0, "nothing sent")
+	assert_true(s3.cp.visible, "not hidden in their hands")
+	s3.c.grab.set_owner(EID, 2, "held")          # our own hold: allowed
+	s3.cam.picked_object = s3.cp
+	assert_true(s3.cam._rack_panel(s3.cp), "own panel sent")
+	s3.cam.free()
 	# a full mirror: the vanilla full rack, nothing sent
 	var s2 := await _setup()
 	s2.c.adapter.gs.rack_capacity = 1

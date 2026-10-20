@@ -270,6 +270,12 @@ func client_store(panel: Object, on_answer: Callable = Callable()) -> bool:
 		return false
 	if _store_pend.has(eid):
 		return true                  # already asked: that answer covers this press too
+	# another player holds it (a looked-at panel): the host refuses that, so do
+	# not hide it in their hands for a round trip
+	var g = gp.get_grab()
+	var me := int(gp.session.my_peer_id()) if gp.session != null and gp.session.has_method("my_peer_id") else 0
+	if g != null and me > 0 and String(g.hold_kind(eid)) != "" and int(g.owner_of(eid)) != me:
+		return false
 	var gs = gp.adapter.game_state()
 	if gs != null and typeof(gs.get("panel_stack")) == TYPE_ARRAY \
 			and gs.get("panel_stack").size() + _store_pend.size() >= _capacity():
