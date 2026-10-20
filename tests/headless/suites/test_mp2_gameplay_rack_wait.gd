@@ -155,7 +155,67 @@ func test_no_answer_keeps_holding_and_a_late_store_still_ends_it() -> void:
 	var r := _relay(s, 0)
 	assert_true(bool(r.ok), "stored late")
 	assert_true(_released(cam), "a late stored still ends the carry")
+	assert_false(cp.visible, "hidden again: the host stored it, its despawn follows")
+	assert_false(c.gp.rack.client_store_late(EID), "the late answer closed it")
 	assert_eq(c.adapter.gs.panel_stack, s.h.gp.rack.stack_of(2), "mirror equals the host's stack")
+	cam.free()
+
+
+## After the local wait the command is still open on MpAuthority: a new press
+## must not send a second rack_store for the same panel, and the open one still
+## counts against the capacity, until its own result arrives.
+func test_timed_out_store_blocks_a_resend_until_its_result() -> void:
+	var s := await _setup()
+	var c = s.c
+	var cam: Node = s.cam
+	var cp: Node3D = s.cp
+	c.gp.rack.store_wait_ms = 40
+	c.adapter.gs.rack_capacity = 1
+	s.h.adapter.gs.rack_capacity = 0          # the host will refuse it
+	assert_true(cam._rack_panel(cp), "sent")
+	await tree.create_timer(0.2).timeout
+	assert_true(c.gp.rack.client_store_late(EID), "timed out, still open")
+	assert_true(cp.visible, "shown again at the timeout")
+	assert_false(cam._rack_panel(cp), "a new press waits for the open command")
+	assert_eq(s.auth.sent.size(), 1, "no second rack_store")
+	assert_eq(cam.picked_object, cp, "still carried")
+	assert_true(cp.visible, "not hidden by the absorbed press")
+	# GRAB's busy branch gets false too, so it releases the panel itself
+	# instead of waiting on an answer that is not coming for it
+	var got: Array = []
+	assert_false(c.gp.rack.client_store(cp, func(res: String): got.append(res)), "busy branch: nothing sent")
+	assert_eq(got, [], "no callback for a request that was never sent")
+	# another panel: the open request still holds the last slot
+	var cp2 := FakeAdapter.FPooled.new()
+	cp2.pool_id = "panel"
+	cp2.add_to_group("panel")
+	c.adapter.world.add_child(cp2)
+	c.bodies.add(cp2, EID + 1, "pooled", "panel")
+	assert_false(cam._rack_panel(cp2), "the open request counts against the capacity")
+	assert_eq(s.auth.sent.size(), 1, "nothing more sent")
+	# its refusal arrives: nothing changes, and the player can try again
+	assert_false(bool(_relay(s, 0).ok), "host refused")
+	assert_false(c.gp.rack.client_store_late(EID), "closed by its result")
+	assert_true(cp.visible, "still visible")
+	assert_eq(cam.picked_object, cp, "still carried")
+	assert_true(cam._rack_panel(cp), "a new request after the result")
+	assert_eq(s.auth.sent.size(), 2, "sent again")
+	cam.free()
+
+
+## A late "stored" after clear() (the session ended) leaves the node alone.
+func test_late_store_after_clear_does_not_hide() -> void:
+	var s := await _setup()
+	var c = s.c
+	var cam: Node = s.cam
+	var cp: Node3D = s.cp
+	c.gp.rack.store_wait_ms = 40
+	assert_true(cam._rack_panel(cp), "sent")
+	await tree.create_timer(0.2).timeout
+	c.gp.rack.clear()
+	assert_false(c.gp.rack.client_store_late(EID), "cleared")
+	_relay(s, 0)
+	assert_true(cp.visible, "not hidden after clear")
 	cam.free()
 
 

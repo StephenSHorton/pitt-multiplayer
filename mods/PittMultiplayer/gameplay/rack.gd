@@ -16,7 +16,9 @@ const BUSY_METAS := ["consumed", "orbit_in_orbit", "pending_maw_recycle", "in_ca
 	"pitt_mp_press_stroke"]
 const RETURN_SPREAD_M := 0.6
 ## Client: a rack_store with no answer after this long counts as refused (the
-## panel stays in the hands); a later "stored" answer still ends the carry.
+## panel stays in the hands); a later "stored" answer still ends the carry. The
+## command itself stays open on MpAuthority longer than this, so a timed-out
+## request stays in _store_late until its own result arrives.
 const STORE_WAIT_MS := 2000
 
 
@@ -35,6 +37,7 @@ var _pending: Dictionary = {}       # node instance id -> peer (spawned for a wi
 var _ctr := {"rack_stored": 0, "rack_withdrawn": 0, "rack_refused": 0, "rack_returned": 0,
 	"client_store_sent": 0, "client_store_ok": 0, "client_store_refused": 0, "client_store_timeout": 0}
 var _store_pend: Dictionary = {}    # client: eid -> StoreReq (rack_store sent, no answer yet)
+var _store_late: Dictionary = {}    # client: eid -> StoreReq (timed out, the command still open)
 var store_wait_ms := STORE_WAIT_MS
 
 
@@ -53,6 +56,7 @@ func clear() -> void:
 		(req as StoreReq).settled = true
 		_store_unhide(req)
 	_store_pend.clear()
+	_store_late.clear()
 
 
 func stack_of(peer: int) -> Array:
@@ -263,13 +267,17 @@ func client_apply_stack(stack) -> bool:
 ## carried). A "stored" that comes after a "timeout" is still delivered.
 ## The mirrored panel_stack is never written here, only by the host's fx rack,
 ## so it cannot drift from the host's stack. One rack_store per panel at a time;
-## panels in flight count against the capacity like the racked ones.
+## panels in flight count against the capacity like the racked ones. That holds
+## after a timeout too, until the command's own result arrives: a press then is
+## refused here (false), so a second request can never race the first.
 func client_store(panel: Object, on_answer: Callable = Callable()) -> bool:
 	var eid := int(gp.eid_of(panel))
 	if eid <= 0:
 		return false
 	if _store_pend.has(eid):
 		return true                  # already asked: that answer covers this press too
+	if _store_late.has(eid):
+		return false                 # timed out but still open on the host: wait for it
 	# another player holds it (a looked-at panel): the host refuses that, so do
 	# not hide it in their hands for a round trip
 	var g = gp.get_grab()
@@ -278,7 +286,7 @@ func client_store(panel: Object, on_answer: Callable = Callable()) -> bool:
 		return false
 	var gs = gp.adapter.game_state()
 	if gs != null and typeof(gs.get("panel_stack")) == TYPE_ARRAY \
-			and gs.get("panel_stack").size() + _store_pend.size() >= _capacity():
+			and gs.get("panel_stack").size() + _store_pend.size() + _store_late.size() >= _capacity():
 		return false
 	if gp.api == null or not ("commands" in gp.api):
 		return false
@@ -310,12 +318,23 @@ func client_store_pending(eid: int) -> bool:
 	return _store_pend.has(eid)
 
 
+## Client: a rack_store for eid timed out here but its command is still open.
+func client_store_late(eid: int) -> bool:
+	return _store_late.has(eid)
+
+
 func _store_answered(res, req: StoreReq) -> void:
 	var late := req.settled
+	var tracked: bool = _store_late.get(req.eid, null) == req   # false once clear() dropped it
 	_store_settle(req)
+	if _store_late.get(req.eid, null) == req:
+		_store_late.erase(req.eid)
 	if bool(res.ok):
 		# stays hidden: the host recycled it and its despawn follows (the pool
-		# shows the node again when it hands it out next)
+		# shows the node again when it hands it out next). A late one was shown
+		# again at the timeout: hide it again, if the node still stands for it.
+		if late and tracked and is_instance_valid(req.node) and int(gp.eid_of(req.node)) == req.eid:
+			req.node.visible = false
 		_ctr.client_store_ok += 1
 		_store_answer(req, "stored")
 	elif not late:
@@ -328,6 +347,7 @@ func _store_expired(req: StoreReq) -> void:
 	if req.settled:
 		return
 	_store_settle(req)
+	_store_late[req.eid] = req
 	_ctr.client_store_timeout += 1
 	_store_unhide(req)
 	_store_answer(req, "timeout")

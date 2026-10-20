@@ -874,8 +874,10 @@ values), `panel_stack` (the receiving peer's own stack, 6.11).
 entity and appends its pool id to the peer's host-side stack. The client (`rack.client_store`) hides the
 panel but keeps carrying it until the command's result: `ok` ends the carry (pickup sound, control hints);
 a refusal (rack full, reach, held by someone else, ...) or no result within 2 s shows it again, still in the
-hands (the game's own full rack shows no message either); a late `ok` still ends the carry. One request per
-panel at a time, in-flight requests count against the capacity, and the client never writes its
+hands (the game's own full rack shows no message either); a late `ok` still ends the carry and hides it
+again. One request per panel at a time: a timed-out request stays open until its own result (the command
+deadline is longer than the 2 s wait), so a new press for that panel sends nothing, and in-flight or
+timed-out requests count against the capacity. The client never writes its
 `panel_stack` itself, so it always equals the host's stack. `_try_withdraw_panel` (:863) /
 `_refill_from_panel_stack` (:934) → `rack_withdraw {}`: host spawns the panel at the peer's rig hands and
 calls `grab.grant(eid, peer, "held", carry=true)`. The client starts the carry itself
