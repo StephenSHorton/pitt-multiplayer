@@ -13,6 +13,7 @@ var loading_log: Array = []
 var load_ratio := 0.0
 var pins := 0
 var unpins := 0
+var step_limits: Array = []
 
 
 func pool_manager() -> Object:
@@ -69,3 +70,10 @@ func unpin_physics() -> void:
 	if _pinned:
 		unpins += 1
 	_pinned = false
+
+
+## Recorded, never applied (several peers share one engine).
+func limit_physics_steps(on: bool) -> void:
+	if on != _steps_limited:
+		step_limits.append(on)
+	_steps_limited = on

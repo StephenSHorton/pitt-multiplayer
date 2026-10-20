@@ -108,11 +108,23 @@ func test_sleep_burst_leaves_room_for_awake_bodies() -> void:
 	for i in 300:
 		rig.spawn(h, "duck", Vector3((i % 20) * 0.5, 0.2, -int(i / 20.0) * 0.5))
 	await rig.physics(2)
+	var now := Time.get_ticks_msec()
 	for eid in host.ents:
-		ps.sleep_sched[eid] = {"t0": 0, "n": 0}
-	ps.sleep_next_ms = 0
+		host._schedule_sleep_peer(ps, eid, now)
 	var before := int(host.counters.sleep_capped)
-	host._build_shared(Time.get_ticks_msec())
+	var firsts0 := int(ps.first_sleeps)
+	host._build_shared(now)
 	assert_true(host._c_ents.size() > 0, "bodies awake")
-	host._send_peer(ps, Time.get_ticks_msec())
+	# nothing of the awake bodies was sent to this peer yet: they bypass the change gate
+	for i in host._c_ents.size():
+		ps.fit(host._ai_next)
+		ps.ls_t[host._c_ai[i]] = 0
+	host._send_peer(ps, now)
 	assert_true(int(host.counters.sleep_capped) > before, "the SLEEP burst was capped for this tick")
+	var sent_first := int(ps.first_sleeps) - firsts0
+	assert_true(sent_first > 0 and sent_first < 300, "first SLEEPs go out first, capped (%d)" % sent_first)
+	var awake_sent := 0
+	for i in host._c_ents.size():
+		if int(ps.ls_t[host._c_ai[i]]) == now:
+			awake_sent += 1
+	assert_true(awake_sent > 0, "the awake bodies still got room this tick (%d)" % awake_sent)

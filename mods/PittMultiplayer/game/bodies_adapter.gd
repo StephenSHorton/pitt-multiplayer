@@ -8,11 +8,14 @@ extends RefCounted
 
 const DEFAULT_EYE := Vector3(0, 0.65, 0)
 const MAX_PHYSICS_STEPS := 8   # catch-up cap while physics is pinned
+const OVERLOAD_PHYSICS_STEPS := 4   # catch-up cap while the host's physics is overloaded
 
 var api = null
 var _pinned := false
 var _saved_ticks := 60
 var _saved_steps := 8
+var _steps_limited := false
+var _steps_before := 8
 
 
 func setup(p_api) -> void:
@@ -155,10 +158,35 @@ func pin_physics(hz: int = 60) -> void:
 		Engine.max_physics_steps_per_frame = MAX_PHYSICS_STEPS
 
 
+## P11 (overload guard): while the host's physics is overloaded, fewer catch-up
+## steps per rendered frame. A long frame then slows the simulation a little
+## instead of running up to MAX_PHYSICS_STEPS steps in one frame, which makes
+## the next frame longer still. Only while pinned; the value in effect before
+## (PittAPI's pin command may have set it) comes back when the overload ends.
+func limit_physics_steps(on: bool) -> void:
+	if on == _steps_limited:
+		return
+	if on:
+		if not _pinned:
+			return
+		_steps_before = Engine.max_physics_steps_per_frame
+		_steps_limited = true
+		Engine.max_physics_steps_per_frame = mini(_steps_before, OVERLOAD_PHYSICS_STEPS)
+	else:
+		_steps_limited = false
+		if _pinned:
+			Engine.max_physics_steps_per_frame = _steps_before
+
+
+func physics_steps_limited() -> bool:
+	return _steps_limited
+
+
 func unpin_physics() -> void:
 	if not _pinned:
 		return
 	_pinned = false
+	_steps_limited = false
 	var pm = g("PerformanceMonitor")
 	if pm != null:
 		pm.set_process(true)

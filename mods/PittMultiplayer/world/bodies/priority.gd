@@ -4,6 +4,11 @@ extends RefCounted
 ## Each send tick takes entities in descending acc until the tick's byte budget
 ## is used, then zeroes their acc. Starvation-free: every awake body's acc keeps
 ## growing until it is sent.
+## Change gating (0.2.3): per peer, w is also scaled by change_w(error), the error
+## between the pose that peer's client draws from the last record it was sent
+## (extrapolated as Interp does) and the current pose. Below GATE_POS_M and
+## GATE_ROT_DEG the weight is 0: the body is not a candidate for that peer this
+## tick (the sender's 1 Hz forced refresh, SNAP and boost bypass the gate).
 
 const W_HELD_OTHER := 4.0
 const W_HELD_HOST := 3.0
@@ -14,6 +19,11 @@ const DIST_SCALE := 8.0
 const DIST_FLOOR := 0.05
 const BOOST := 3.0
 const MIN_RECORD := 19          # Codec.BODY_BASE
+const GATE_POS_M := 0.002       # below this position error (and GATE_ROT_DEG) a record changes nothing
+const GATE_ROT_DEG := 0.5
+const GATE_ROT_DOT := 0.99999048   # |q.q0| = cos(GATE_ROT_DEG / 2)
+const CHANGE_REF_M := 0.05      # an error of this much doubles the weight (capped at x4)
+const CHANGE_REF_DEG := 10.0
 
 
 ## owner: owning peer (1 = host); owner_kind "" | "held" | "equipped"; peer: the receiver.
@@ -41,6 +51,16 @@ static func motion_w(speed: float) -> float:
 
 static func boost_w(boosted: bool) -> float:
 	return BOOST if boosted else 1.0
+
+
+## err_m: distance between the client's extrapolated pose and the current one;
+## rot_dot: |q_extrapolated . q_now| (rotation as the client draws it). 0 below the
+## gate, else 1 + the error measured in CHANGE_REF units (at most 4).
+static func change_w(err_m: float, rot_dot: float) -> float:
+	if err_m < GATE_POS_M and rot_dot > GATE_ROT_DOT:
+		return 0.0
+	var deg := rad_to_deg(2.0 * acos(clampf(rot_dot, 0.0, 1.0)))
+	return 1.0 + clampf(err_m / CHANGE_REF_M + deg / CHANGE_REF_DEG, 0.0, 3.0)
 
 
 ## cands: [[acc: float, eid: int, size: int]]; returns the eids that fit in
