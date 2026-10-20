@@ -51,6 +51,7 @@ var reuse_detected := 0
 var _vis: Dictionary = {}       # pooled entity id -> {cb: Callable, hid: bool, reused: bool}
 ## P10 gate (see the header)
 var gate_full_diff := true
+var _gate_explicit := false     # a set_reconcile_mode call passed gate_full_diff
 var gated_full_interval := 1.0
 var full_diffs := 0             # full set diffs run (measurement)
 var reconcile_calls := 0        # reconcile() calls that reached the pools
@@ -285,15 +286,19 @@ func release(entity_id: int, source: String = "net") -> void:
 # ------------------------------------------------------------------ L8 reconcile mode
 
 ## {full_every_frame: bool, detect_reuse: bool, gate_full_diff: bool}; missing
-## keys keep their value. gate_full_diff defaults to the PittAPI setting
-## entity_reconcile_gate (P10).
+## keys keep their value. gate_full_diff follows the PittAPI setting
+## entity_reconcile_gate (P10, the durable switch, re-read on each call) until a
+## call passes gate_full_diff explicitly; from then on the explicit value sticks
+## for the life of this registry, so a later plain {full_every_frame,
+## detect_reuse} call (bodies.gd host start and teardown) does not undo it.
 func set_reconcile_mode(mode: Dictionary) -> void:
 	var was := _watching()
 	full_every_frame = bool(mode.get("full_every_frame", full_every_frame))
 	detect_reuse = bool(mode.get("detect_reuse", detect_reuse))
 	if mode.has("gate_full_diff"):
 		gate_full_diff = bool(mode.gate_full_diff)
-	elif _core != null and _core.has_method("setting"):
+		_gate_explicit = true
+	elif not _gate_explicit and _core != null and _core.has_method("setting"):
 		gate_full_diff = bool(_core.setting("entity_reconcile_gate", true))
 	_dirty = true
 	var want := _watching()

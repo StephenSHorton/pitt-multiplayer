@@ -22,10 +22,21 @@ class FixedAuth extends RefCounted:
 		return 1 if auth else 2
 
 
+## FakeEntityCore plus the PittAPI setting() lookup (pittapi.gd), for the P10
+## entity_reconcile_gate switch.
+class SettingCore extends "res://tests/fakes/mp2_bodies/fake_entity_core.gd":
+	var values: Dictionary = {}
+	var reads: Array = []
+
+	func setting(key: String, default = null):
+		reads.append(key)
+		return values.get(key, default)
+
+
 var _made: Array = []
 
 
-func _setup(authority: bool) -> Array:
+func _setup(authority: bool, settings = null) -> Array:
 	var api = FakeApi2.new("ent")
 	var container := Node3D.new()
 	container.name = "ObjectPools"
@@ -34,7 +45,9 @@ func _setup(authority: bool) -> Array:
 	pools.gravity = false
 	runner.add_child(pools)
 	pools.setup(container)
-	var core = FakeEntityCore.new(api, pools)
+	var core = FakeEntityCore.new(api, pools) if settings == null else SettingCore.new(api, pools)
+	if settings != null:
+		core.values = settings
 	var a := FixedAuth.new()
 	a.auth = authority
 	core.authority = a
@@ -283,3 +296,53 @@ func test_gate_does_not_touch_the_idle_path() -> void:
 	assert_eq(_ticks(reg, 1), 0, "count-only check as before")
 	assert_eq(_ticks(reg, 15), 1, "full diff after full_interval (0.25 s)")
 	assert_eq(reg.id_of(a), 0, "despawned")
+
+
+func test_gate_setting_off_restores_the_full_diff_every_frame() -> void:
+	var s := _setup(true, {"entity_reconcile_gate": false})
+	var pools = s[2]
+	var reg = s[1]
+	for i in 50:
+		pools.spawn("duck", Vector3(i, 1, 0))
+	_host(s)
+	assert_true(reg._core.reads.has("entity_reconcile_gate"), "the setting key is read")
+	assert_false(reg.gate_full_diff, "the setting turned the gate off")
+	assert_eq(_ticks(reg, 120), 120, "one full diff per frame (the old path)")
+	assert_eq(reg.count("pooled"), 50, "all registered")
+
+
+func test_gate_setting_on_keeps_the_gate() -> void:
+	var s := _setup(true, {"entity_reconcile_gate": true})
+	var pools = s[2]
+	var reg = _host(s)
+	for i in 50:
+		pools.spawn("duck", Vector3(i, 1, 0))
+	var n := _ticks(reg, 120)
+	assert_true(n >= 2 and n <= 4, "gated: %d full diffs in 120 frames" % n)
+
+
+func test_gate_explicit_key_survives_a_plain_mode_call() -> void:
+	# setting on, explicit off: bodies.gd host start / teardown re-call the mode
+	# without the key, and must not undo the override
+	var s := _setup(true, {"entity_reconcile_gate": true})
+	var pools = s[2]
+	var reg = s[1]
+	for i in 20:
+		pools.spawn("duck", Vector3(i, 1, 0))
+	reg.set_reconcile_mode({"gate_full_diff": false})
+	_host(s)
+	assert_false(reg.gate_full_diff, "explicit off kept after a plain call")
+	assert_eq(_ticks(reg, 30), 30, "full diff every frame")
+	reg.set_reconcile_mode({"full_every_frame": false, "detect_reuse": false})
+	_host(s)
+	assert_false(reg.gate_full_diff, "still off after a teardown + host start")
+	# setting off, explicit on: the explicit value wins the same way
+	var s2 := _setup(true, {"entity_reconcile_gate": false})
+	var reg2 = s2[1]
+	for i in 20:
+		s2[2].spawn("duck", Vector3(i, 1, 0))
+	reg2.set_reconcile_mode({"gate_full_diff": true})
+	_host(s2)
+	assert_true(reg2.gate_full_diff, "explicit on kept over the setting")
+	var n := _ticks(reg2, 120)
+	assert_true(n >= 2 and n <= 4, "gated: %d full diffs in 120 frames" % n)
