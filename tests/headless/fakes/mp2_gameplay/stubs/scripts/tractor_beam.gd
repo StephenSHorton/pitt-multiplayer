@@ -3,6 +3,8 @@ extends RigidBody3D
 ## signatures by the GAMEPLAY stream (our own minimal code: every function only
 ## records its call, stub_calls / stub_hook). Lets extensions/gameplay/tractor_beam_ext.gd compile
 ## and be exercised headless.
+## P12 (force guards): a minimal own-code target flow (stub_* inputs, stub_pushed
+## records every apply_central_force) so the field-tool guards can be exercised.
 
 
 var pool_id = "tool_tractor_beam"
@@ -10,6 +12,9 @@ var is_active: bool = false
 var is_equipped: bool = false
 var equipped_offset: Vector3 = Vector3.ZERO
 var placed = false
+## tests: anything with get_overlapping_bodies() (the game's is an Area3D)
+var beam_area = null
+var stub_pushed: Array = []
 var stub_calls: Array = []
 ## tests: called with the method name inside every recorded stub call
 var stub_hook: Callable = Callable()
@@ -26,6 +31,19 @@ func _ready() -> void:
 
 func _physics_process(delta: float) -> void:
 	pass
+
+func _update_pull(delta: float) -> void:
+	_stub("_update_pull")
+	if beam_area == null:
+		return
+	for b in beam_area.get_overlapping_bodies():
+		if not (b is RigidBody3D) or b == self:
+			continue
+		# the game skips static-frozen bodies the same way
+		if b.freeze and b.freeze_mode == RigidBody3D.FREEZE_MODE_STATIC:
+			continue
+		b.apply_central_force(Vector3.UP)
+		stub_pushed.append(b)
 
 func _process(delta: float) -> void:
 	pass

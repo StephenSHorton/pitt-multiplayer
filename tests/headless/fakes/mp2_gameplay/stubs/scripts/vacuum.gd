@@ -3,6 +3,8 @@ extends RigidBody3D
 ## signatures by the GAMEPLAY stream (our own minimal code: every function only
 ## records its call, stub_calls / stub_hook). Lets extensions/gameplay/vacuum_ext.gd compile
 ## and be exercised headless.
+## P12 (force guards): a minimal own-code target flow (stub_* inputs, stub_pushed
+## records every apply_central_force) so the field-tool guards can be exercised.
 
 
 var pool_id = "tool_vacuum"
@@ -12,6 +14,10 @@ var equipped_offset: Vector3 = Vector3.ZERO
 var equipped_rotation_deg: Vector3 = Vector3.ZERO
 var placed = false
 var _bag_items: Array = []
+var _active_targets: Array[RigidBody3D] = []
+## tests: stand-in for the suction Area3D overlaps
+var stub_overlaps: Array = []
+var stub_pushed: Array = []
 var stub_calls: Array = []
 ## tests: called with the method name inside every recorded stub call
 var stub_hook: Callable = Callable()
@@ -34,13 +40,22 @@ func _process(delta: float) -> void:
 
 func _update_active_targets() -> void:
 	_stub("_update_active_targets")
+	_active_targets.clear()
+	for b in stub_overlaps:
+		if b is RigidBody3D and b != self and _suction_accepts(b):
+			_active_targets.append(b)
+
+func _apply_suction_forces(delta: float) -> void:
+	for b in _active_targets:
+		b.apply_central_force(Vector3.UP)
+		stub_pushed.append(b)
 
 func _check_ingestion() -> void:
 	_stub("_check_ingestion")
 
 func _suction_accepts(_body: RigidBody3D) -> bool:
 	_stub("_suction_accepts")
-	return false
+	return true
 
 func _get_release_marker() -> Marker3D:
 	_stub("_get_release_marker")
