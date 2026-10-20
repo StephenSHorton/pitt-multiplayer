@@ -11,6 +11,10 @@ const G = preload("../../gameplay/mp_gate.gd")
 ## pick already skips, for the length of the call, then restored. It has no space,
 ## so the round trip changes nothing in the simulation. Bodies in a space, and
 ## every tick without a parked body, run the game's pull untouched.
+## Checked against Jolt Physics on 4.7.2 (headless suites run the default engine): Jolt
+## stores body_set_mode on a spaceless body silently, unlike apply_central_force, and a
+## pool-parked body re-enabled after the round trip is back in its space with its mode
+## and freeze unchanged.
 func _update_pull(delta: float) -> void:
 	var parked: Array = []
 	if beam_area != null:
