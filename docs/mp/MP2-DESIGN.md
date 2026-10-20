@@ -285,9 +285,9 @@ and `q` turned by `a·t` when `Interp` rotates, which the host reads from `Inter
 plus the rotation angle. `change_w` is 0 below 2 mm and 0.5°, so the body is not a candidate for that peer, and
 `1 + clamp(err / 5 cm + angle / 10°, 0, 3)` otherwise. The client only extrapolates for about one update
 interval (at least `Interp.EXTRAP_MIN_MS`, 100 ms), so a record with LIN or ANG is a candidate again whatever
-its error once it is more than half a send interval short of that (about 83 ms; it goes out on the tick at
-about 100 ms): a body in steady motion is thinned to about 10 Hz, never held by the client, and stays inside
-the 11.2 staleness target. A body not sent to a peer for 1 s is a candidate again whatever its error (the
+its error once it is more than half a send interval short of the smaller of that and 100 ms (about 83 ms; it
+goes out on the tick at about 100 ms): a body in steady motion is thinned to about 10 Hz, never held by the
+client, and stays inside the 11.2 staleness target whichever Interp the build carries. A body not sent to a peer for 1 s is a candidate again whatever its error (the
 forced refresh, which heals a lost record; `refreshes` counts the ones actually sent); SNAP and boost bypass
 the gate, as does a body not yet sent since it woke. LIN is only encoded at 0.05 m/s or faster (19 B records
 for still or crawling bodies).

@@ -457,15 +457,18 @@ func _free_body(rep, pos: Vector3, v: Vector3, w: Vector3) -> Array:
 ## Real physics frames on the fake clock: each frame the client side first takes the
 ## records that arrived (into a real Interp ring) and draws the body `behind_ms`
 ## behind the host, then the host steps. -> {modes, max_err_m, max_err_deg, gaps, n}
-func _drive_client(rep, s, b: Array, frames: int, behind_ms: int) -> Dictionary:
+## stop_frame >= 0: from that frame on, the body is stopped dead right after the host
+## sends it a record, and the error is measured only from 40 ms after the stop.
+func _drive_client(rep, s, b: Array, frames: int, behind_ms: int, stop_frame: int = -1) -> Dictionary:
 	var eid: int = b[0]
 	var n: RigidBody3D = b[1]
 	var hz := maxi(1, Engine.physics_ticks_per_second)
 	var t_base: int = rep.t
 	var ring: Array = []
 	var seen := 0
-	var out := {"modes": {}, "max_err_m": 0.0, "max_err_deg": 0.0, "gaps": [], "n": 0}
+	var out := {"modes": {}, "max_err_m": 0.0, "max_err_deg": 0.0, "gaps": [], "n": 0, "measured": 0}
 	var last_t := -1
+	var stopped_t := -1
 	for f in frames:
 		await wait_physics(1)
 		rep.t = t_base + roundi(float(f + 1) * 1000.0 / float(hz))
@@ -480,11 +483,12 @@ func _drive_client(rep, s, b: Array, frames: int, behind_ms: int) -> Dictionary:
 				(out.gaps as Array).append(int(r.hm) - last_t)
 			last_t = int(r.hm)
 			out.n = int(out.n) + 1
-		if ring.size() >= 2:
+		if ring.size() >= 2 and (stop_frame < 0 or (stopped_t >= 0 and rep.t - behind_ms >= stopped_t + 40)):
 			var rt: int = rep.t - behind_ms
 			var smp: Dictionary = Interp.sample(ring, rt)
 			var mode := String(smp.get("mode", ""))
 			out.modes[mode] = int(out.modes.get(mode, 0)) + 1
+			out.measured = int(out.measured) + 1
 			# where the body really was at rt (it moves and turns uniformly)
 			var back := float(rep.t - rt) / 1000.0
 			var p_true: Vector3 = n.global_position - n.linear_velocity * back
@@ -495,7 +499,16 @@ func _drive_client(rep, s, b: Array, frames: int, behind_ms: int) -> Dictionary:
 				q_true = (Quaternion(n.angular_velocity / wl, -wl * back) * q_now).normalized()
 			out.max_err_m = maxf(float(out.max_err_m), (smp.p as Vector3).distance_to(p_true))
 			out.max_err_deg = maxf(float(out.max_err_deg), Interp.angle_deg(smp.q, q_true))
+		var before: int = s.recs.size()
 		rep.physics_step()
+		if stop_frame >= 0 and f >= stop_frame and stopped_t < 0:
+			for i in range(before, s.recs.size()):
+				if int(s.recs[i].eid) == eid:
+					n.linear_velocity = Vector3.ZERO
+					n.angular_velocity = Vector3.ZERO
+					stopped_t = rep.t
+					break
+	out["stopped_t"] = stopped_t
 	return out
 
 
@@ -512,8 +525,8 @@ func test_straight_line_body_is_thinned_but_never_held() -> void:
 		max_gap = maxi(max_gap, int(g))
 	assert_true(int(r.n) >= 8, "records keep coming (%d in 3 s)" % int(r.n))
 	assert_true(int(r.n) <= 60, "a straight line at constant velocity is thinned below 30 Hz (%d in 3 s)" % int(r.n))
-	assert_true(max_gap <= int(rep._extrap_min_ms) + 2,
-		"never older than the client's shortest extrapolation (%d ms, cap %d)" % [max_gap, rep._extrap_min_ms])
+	assert_true(max_gap <= 102 and max_gap <= int(rep._extrap_min_ms) + 2,
+		"at most about 100 ms apart, within the client's shortest extrapolation (%d ms, cap %d)" % [max_gap, rep._extrap_min_ms])
 	assert_eq(int(r.modes.get("hold", 0)), 0, "the client never holds it (%s)" % str(r.modes))
 	assert_true(float(r.max_err_m) < 0.005, "drawn where it is (%.4f m)" % float(r.max_err_m))
 	assert_eq(s.bad_packets, 0, "every packet decodes")
@@ -533,6 +546,28 @@ func test_spinning_body_drawn_as_it_turns() -> void:
 	assert_eq(int(r.modes.get("hold", 0)), 0, "never held (%s)" % str(r.modes))
 	assert_true(float(r.max_err_deg) < 1.0, "the client's rotation follows the spin (%.2f deg, client rotates: %s)"
 		% [float(r.max_err_deg), str(rep._client_rotates)])
+	rep.clear()
+	_teardown()
+
+
+## The reviewer's case: a spin stops dead right after a record with ANG. A client that
+## turns q by ANG must get the stop on the next tick (the host predicts that turn), not
+## keep turning until the moving-record refresh; one that holds rotation is right anyway.
+func test_spin_stopped_after_a_record_is_drawn_still() -> void:
+	var h := _setup()
+	var rep = h[0]
+	var s = h[1]
+	var b: Array = _free_body(rep, Vector3(0, 1, 0), Vector3.ZERO, Vector3(0.0, 2.0, 0.0))
+	rep.peer_ready(PEER)
+	var hz := maxi(1, Engine.physics_ticks_per_second)
+	var r: Dictionary = await _drive_client(rep, s, b, hz * 2, 20, hz)
+	assert_true(int(r.stopped_t) > 0, "stopped right after a record")
+	assert_true(int(r.measured) >= 20, "drawn after the stop (%d frames, %s)" % [int(r.measured), str(r.modes)])
+	assert_true(float(r.max_err_deg) < 1.0, "drawn still from 40 ms after the stop (%.2f deg, client rotates: %s)"
+		% [float(r.max_err_deg), str(rep._client_rotates)])
+	# the Interp with per-body caps (EXTRAP_MIN_MS) is the one that turns q by ANG
+	var cm: Dictionary = (Interp as Script).get_script_constant_map()
+	assert_eq(rep._client_rotates, cm.has("EXTRAP_MIN_MS"), "the host's client model matches Interp")
 	rep.clear()
 	_teardown()
 

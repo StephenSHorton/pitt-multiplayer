@@ -64,6 +64,7 @@ const REFRESH_MS := 1000              # an awake body is re-sent at least this o
 const LIN_MIN := 0.05                 # m/s: slower bodies are sent without LIN (the client holds them)
 const ANG_MIN_SQ := 0.0025            # (rad/s)^2: faster spin carries ANG
 const EXTRAP_FALLBACK_MS := 100       # the client's shortest extrapolation when Interp names none
+const MOVING_REFRESH_MS := 100        # a LIN / ANG record is never left much older (11.2: p95 <= 150 ms)
 const ANG_EPS := 0.0001               # rad/s below which the client does not rotate a record (Interp)
 const NET_REST_MS := 400              # still this long (pose within STILL_M / STILL_ROT_DOT): net-rest
 const STILL_M := 0.002
@@ -267,7 +268,8 @@ var _cand_rr := 0                  # overload: start of this tick's window over 
 var _hidden_set: Dictionary = {}   # eid -> true: bodies hidden now (re-checked every send tick)
 # the client's extrapolation model (Interp, read once): a LIN / ANG record is re-sent
 # once it is _extrap_ref_ms old (more than half a send interval short of the client's
-# shortest cap, so the send tick that re-sends it is at most about at that cap);
+# shortest cap and of MOVING_REFRESH_MS, so the send tick that re-sends it is at most
+# about at that age, whichever Interp the build carries);
 # _client_rotates: Interp turns q by ANG (else the client holds rotation)
 var _extrap_min_ms := EXTRAP_FALLBACK_MS
 var _extrap_ref_ms := EXTRAP_FALLBACK_MS - SEND_INTERVAL_MS / 2 - 1
@@ -316,7 +318,7 @@ func _init(p_bodies = null, p_pool_ids: Array = [], p_detail: String = "normal")
 func _read_client_model() -> void:
 	var cm: Dictionary = (Interp as Script).get_script_constant_map()
 	_extrap_min_ms = int(cm.get("EXTRAP_MIN_MS", cm.get("MAX_EXTRAP_MS", EXTRAP_FALLBACK_MS)))
-	_extrap_ref_ms = maxi(SEND_INTERVAL_MS, _extrap_min_ms - SEND_INTERVAL_MS / 2 - 1)
+	_extrap_ref_ms = maxi(SEND_INTERVAL_MS, mini(_extrap_min_ms, MOVING_REFRESH_MS) - SEND_INTERVAL_MS / 2 - 1)
 	_client_rotates = false
 	for m in (Interp as Script).get_script_method_list():
 		if String(m.get("name", "")) == "rotate":
