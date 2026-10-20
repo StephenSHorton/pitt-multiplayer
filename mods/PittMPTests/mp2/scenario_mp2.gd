@@ -17,7 +17,7 @@ const GrabClient = preload("grab_client.gd")
 const Dispenser = preload("dispenser.gd")
 const Coop = preload("coop_checks.gd")
 const GAMEPLAY_IDS := ["P8", "P2", "P3", "P12", "P10", "P11", "P1"]
-const GRAB_IDS := ["G1", "G3", "G2", "G4", "G6", "G10"]    # G5 (leaves the session) runs after the end checks
+const GRAB_IDS := ["G1", "G3", "G2", "G4", "G6", "G10", "G11"]    # G5 (leaves the session) runs after the end checks
 
 const JOIN_TIMEOUT_S := 240.0
 

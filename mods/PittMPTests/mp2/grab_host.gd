@@ -6,7 +6,7 @@ extends "../scenario_base.gd"
 ## G5 (disconnect) ends the client's session, so it runs last. G10: a crate with
 ## ducks in it, grabbed through the real input path (g10_crate.gd).
 
-const ORDER := ["G1", "G3", "G2", "G4", "G6", "G10", "G5"]
+const ORDER := ["G1", "G3", "G2", "G4", "G6", "G10", "G11", "G5"]
 const CLIENT_SLOT := 2
 const Crate = preload("g10_crate.gd")
 
@@ -412,3 +412,144 @@ func _g10_host_control(crate: RigidBody3D, ducks: Array, fwd: Vector3, h: String
 	await sleep_ms(1500)
 	await cmd("player.teleport", {"position": [p0.x, p0.y, p0.z]})
 	await sleep_ms(400)
+
+
+# ---------------------------------------------------------------- G11 rack withdraw and auto-refill carry (0.2.3)
+# The confirmed client bug: a rack withdraw (the rack key, or the game's auto-refill
+# after placing a panel with auto_rack on) was granted with carry, but nothing on
+# the client started the game's carry; the panel dropped at its feet and this host
+# revoked it for silence. The host seeds the client's rack with three panels; the
+# client takes one with the rack key (a), places it so the auto-refill takes the
+# next (b), then gets a grant while its hands are full (c, racked again).
+
+const G11_PANELS := ["tool_panel", "tool_panel", "tool_panel"]
+## from the grant until the client's first held frame clears await_ack
+const G11_ACK_S := 1.5
+## past ownership_host's silence revoke of a host-originated grant (GRANT_GRACE_MS 1000
+## + SILENCE_MS 1500 after the grant): the unfixed client lost its panel at 2.5 s
+const G11_HOLD_MS := 3500
+
+
+## The first grant to the client after _changes[from] of an eid not in `old`. -> eid or 0.
+func _g11_grant_since(from: int, old: Array) -> int:
+	for i in range(from, _changes.size()):
+		var c: Array = _changes[i]
+		if int(c[2]) == client_peer() and String(c[3]) == "held" and not (int(c[1]) in old):
+			return int(c[1])
+	return 0
+
+
+func _g11_reason(k: String) -> int:
+	return int(grab().counters().get("grab_revoke_reasons", {}).get(k, 0))
+
+
+## Host side of one granted carry (a, b). -> the eid granted, 0 when none.
+func _g11_carry(tag: String, from: int, old: Array) -> int:
+	var pm: Dictionary = await wait_peer_mark(tag + "_pressed", 60.0)
+	if not report.check(tag + "_client_pressed", not pm.is_empty(), ""):
+		return 0
+	var silence0 := _g11_reason("silence")
+	var far0 := _g11_reason("far")
+	var never0 := int(grab().counters().get("grab_grant_never_carried", 0))
+	var found := [0]
+	var ok: bool = await wait_for(func():
+		found[0] = _g11_grant_since(from, old)
+		return found[0] > 0, 3.0)
+	var eid: int = found[0]
+	report.mark(tag + "_granted", {"g11_eid": eid})
+	if not report.check(tag + "_granted_with_carry", ok, "changes %s" % str(_changes.slice(from))):
+		report.mark(tag + "_checked")
+		return 0
+	var n := _node(eid)
+	report.check(tag + "_granted_panel", n != null and String(n.get("pool_id")).begins_with("tool_panel"), str(n))
+	var row = grab().get("host").rows.get(eid, null)
+	var t_grant := Time.get_ticks_msec()
+	ok = await wait_for(func(): return row != null and not row.await_ack, G11_ACK_S)
+	report.value(tag + "_ack_ms", Time.get_ticks_msec() - t_grant)
+	report.check(tag + "_row_client_acked", ok and grab().owner_of(eid) == client_peer(), "owner %d kind %s await_ack %s" % [
+		grab().owner_of(eid), grab().hold_kind(eid), str(row.await_ack) if row != null else "no row"])
+	var hv: Dictionary = await wait_peer_mark(tag + "_holding", 10.0)
+	var cp := Crate.vec(hv.get("g11_pos", []))
+	report.check(tag + "_client_holding_mark", int(hv.get("g11_eid", 0)) == eid and cp != Vector3.INF, "client eid %d" % int(
+		hv.get("g11_eid", 0)))
+	await sleep_ms(300)
+	n = _node(eid)
+	var d := n.global_position.distance_to(cp) if n != null and cp != Vector3.INF else 99.0
+	report.value(tag + "_follow_err_m", d)
+	report.check(tag + "_host_copy_follows_15cm", d <= 0.15, "%.3f m" % d)
+	while Time.get_ticks_msec() - t_grant < G11_HOLD_MS:
+		await tree().process_frame
+	report.check(tag + "_still_client_held", grab().owner_of(eid) == client_peer() and grab().hold_kind(eid) == "held",
+		"owner %d kind %s after %d ms" % [grab().owner_of(eid), grab().hold_kind(eid), Time.get_ticks_msec() - t_grant])
+	report.check(tag + "_no_silence_revoke", _g11_reason("silence") == silence0 and _g11_reason("far") == far0,
+		"revoke reasons %s" % str(grab().counters().get("grab_revoke_reasons", {})))
+	report.check(tag + "_not_never_carried", int(grab().counters().get("grab_grant_never_carried", 0)) == never0, "")
+	report.mark(tag + "_checked")
+	return eid
+
+
+func _g11() -> void:
+	report.begin("G11_rack_carry")
+	var gp = session.get_module("gameplay")
+	var gs = g("GameState")
+	var peer := client_peer()
+	if not report.check("g11_gameplay_rack", gp != null and gp.rack != null, ""):
+		report.mark("g11_ready", {"g11_count": 0})
+		report.mark("g11_end")
+		return
+	var lvl0 := int(gs.upgrades["panel_rack"]["level"])
+	gs.upgrades["panel_rack"]["level"] = maxi(lvl0, 1)
+	var rack = gp.rack
+	var ctr0: Dictionary = rack.counters()
+	rack._stacks[peer] = G11_PANELS.duplicate()
+	rack._send_stack(peer)
+	var from := _changes.size()
+	report.mark("g11_ready", {"g11_count": G11_PANELS.size()})
+	var ea := await _g11_carry("g11a", from, [])
+	from = _changes.size()
+	var eb := await _g11_carry("g11b", from, [ea])
+	if ea > 0:
+		var ok_a: bool = await wait_for(func(): return grab().owner_of(ea) == 1 and grab().hold_kind(ea) == "", 2.0)
+		report.check("g11b_placed_back_to_host", ok_a, "owner %d kind %s" % [grab().owner_of(ea), grab().hold_kind(ea)])
+	await shot("mp2-g11-host-sees-refill-carry")
+
+	# (c) the client's hands are full when the grant lands
+	from = _changes.size()
+	var pm: Dictionary = await wait_peer_mark("g11c_pressed", 60.0)
+	report.check("g11c_client_pressed", not pm.is_empty(), "")
+	var silence0 := _g11_reason("silence")
+	var rack0 := _g11_reason("rack")
+	var found := [0]
+	var ok: bool = await wait_for(func():
+		found[0] = _g11_grant_since(from, [ea, eb])
+		return found[0] > 0, 3.0)
+	var ec: int = found[0]
+	report.check("g11c_granted_with_carry", ok, "")
+	ok = await wait_for(func(): return ec > 0 and _node(ec) == null and grab().hold_kind(ec) == "", 3.0)
+	report.check("g11c_racked_again", ok, "eid %d node %s kind %s" % [ec, str(_node(ec)), grab().hold_kind(ec) if ec > 0 else ""])
+	report.check("g11c_rack_stored", int(rack.counters().get("rack_stored", 0)) == int(ctr0.get("rack_stored", 0)) + 1, str(rack.counters()))
+	report.check("g11c_revoked_for_rack", _g11_reason("rack") == rack0 + 1 and _g11_reason("silence") == silence0,
+		"revoke reasons %s" % str(grab().counters().get("grab_revoke_reasons", {})))
+	var st: Array = rack.stack_of(peer)
+	report.check("g11c_host_stack_back", st.size() == 1, str(st))
+	report.check("g11c_client_keeps_b", eb > 0 and grab().owner_of(eb) == peer and grab().hold_kind(eb) == "held", "owner %d" % (
+		grab().owner_of(eb) if eb > 0 else -1))
+	report.mark("g11c_result", {"g11_eid": ec, "g11_host_stack": st.size()})
+	await wait_peer_mark("g11c_checked", 20.0)
+	await wait_peer_mark("g11_client_done", 30.0)
+	await sleep_ms(500)
+	# clean up: the placed panels, the seeded stack, the upgrade level
+	var pose: Dictionary = session.avatar_pose(peer)
+	var cpos: Vector3 = pose.get("pos", player().global_position)
+	for e in [ea, eb]:
+		var n := _node(e) if e > 0 else null
+		if n != null and n.visible:
+			g("ObjectPoolManager").recycle(n)
+	for n in tree().get_nodes_in_group("panel"):
+		if n is RigidBody3D and n.visible and String(n.get("pool_id")).begins_with("tool_panel") \
+				and (n as Node3D).global_position.distance_to(cpos) < 4.0:
+			g("ObjectPoolManager").recycle(n)
+	rack._stacks.erase(peer)
+	rack._send_stack(peer)
+	gs.upgrades["panel_rack"]["level"] = lvl0
+	report.mark("g11_end")

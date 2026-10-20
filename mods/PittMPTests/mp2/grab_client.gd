@@ -4,7 +4,7 @@ extends "../scenario_base.gd"
 ## (scenario_mp2.gd, BODIES): `await run_grab(ids)` once in the shared world.
 ## Grabs go through the real main_camera._begin_carry (the GRAB extension).
 
-const ORDER := ["G1", "G3", "G2", "G4", "G6", "G10", "G5"]
+const ORDER := ["G1", "G3", "G2", "G4", "G6", "G10", "G11", "G5"]
 const Crate = preload("g10_crate.gd")
 
 
@@ -318,3 +318,158 @@ func _g10_host_control(eid: int, crate: Node3D, ducks: Array, h: String) -> void
 		await shot("mp2-g10-client-sees-host-carry-ducks")
 	report.mark(h + "_checked")
 	await wait_peer_mark(h + "_released", 20.0)
+
+
+# ---------------------------------------------------------------- G11 rack withdraw and auto-refill carry (0.2.3)
+# A panel the host grants with carry (rack withdraw, MP2-DESIGN 6.11) must end in
+# this client's hands through the game's own camera, whichever of the grant and
+# the spawn arrives first: (a) the rack key with free hands, (b) LMB places a
+# panel while auto_rack is on and the game's own refill asks for the next one,
+# (c) the hands are full when the grant lands: the panel goes back on the rack,
+# nothing drops, the game's vanilla busy branch (local push + recycle) never runs.
+
+const G11_PANEL_PREFIX := "tool_panel"
+## from the key press / the placing click until the camera carries the new panel
+const G11_CARRY_S := 1.5
+
+
+## One press of `action` as handle_input reads it (just_pressed in one physics frame).
+func _press(action: String) -> void:
+	await tree().physics_frame
+	Input.action_press(action)
+	await tree().physics_frame
+	await tree().physics_frame
+	Input.action_release(action)
+	await tree().physics_frame
+
+
+func _g11_is_panel(n) -> bool:
+	if not (n is RigidBody3D) or not is_instance_valid(n):
+		return false
+	var pid = n.get("pool_id")
+	return pid != null and String(pid).begins_with(G11_PANEL_PREFIX)
+
+
+## Waits until the camera carries a panel whose eid is not in `old`. -> its eid, 0 on timeout.
+func _g11_new_carry(old: Array) -> int:
+	var found := [0]
+	await wait_for(func():
+		var p = cam().picked_object
+		if _g11_is_panel(p) and _eid(p) > 0 and not (_eid(p) in old):
+			found[0] = _eid(p)
+		return found[0] > 0, G11_CARRY_S)
+	return found[0]
+
+
+## The checks of one granted carry (a, b). -> the eid carried, 0 when none.
+func _g11_carry(tag: String, old: Array, t0: int, started0: int) -> int:
+	var eid := await _g11_new_carry(old)
+	var ms := Time.get_ticks_msec() - t0
+	report.value(tag + "_carry_ms", ms)
+	var pk = cam().picked_object
+	report.check(tag + "_client_carries_new_panel", eid > 0, "picked %s after %d ms (old %s)" % [
+		str(pk.name) if pk != null else "none", ms, str(old)])
+	var gm: Dictionary = await wait_peer_mark(tag + "_granted", 5.0)
+	var granted := int(gm.get("g11_eid", 0))
+	report.check(tag + "_picked_is_granted_panel", eid > 0 and eid == granted, "picked eid %d, host granted %d" % [eid, granted])
+	if eid > 0:
+		report.check(tag + "_mine_local_sim", grab().is_mine(eid) and bodies().is_local_sim(eid), "mine %s local_sim %s" % [
+			grab().is_mine(eid), bodies().is_local_sim(eid)])
+	report.check(tag + "_carry_started_counted", _counter("grab_carry_started") == started0 + 1, "carry_started %d -> %d" % [
+		started0, _counter("grab_carry_started")])
+	await sleep_ms(400)
+	var n := bodies().node_of(eid) as Node3D if eid > 0 else null
+	report.mark(tag + "_holding", {"g11_eid": eid, "g11_pos": Crate.arr(n.global_position) if n != null else []})
+	# the host watches the hold for longer than its silence limit
+	await wait_peer_mark(tag + "_checked", 15.0)
+	report.check(tag + "_client_still_carries", eid > 0 and cam().picked_object == bodies().node_of(eid), "picked %s" % str(
+		cam().picked_object))
+	return eid
+
+
+func _g11() -> void:
+	report.begin("G11_rack_carry")
+	var gs = g("GameState")
+	var mm = g("MenuManager")
+	var m: Dictionary = await wait_peer_mark("g11_ready", 60.0)
+	if not report.check("g11_host_ready", int(m.get("g11_count", 0)) >= 3, ""):
+		report.mark("g11_client_done")
+		return
+	var lvl0 := int(gs.upgrades["panel_rack"]["level"])
+	var auto0 = mm.settings.gameplay.auto_rack
+	gs.upgrades["panel_rack"]["level"] = maxi(lvl0, 1)
+	mm.settings.gameplay.auto_rack = false
+	var ok: bool = await wait_for(func(): return gs.panel_stack.size() >= 3, 5.0)
+	report.check("g11_stack_mirrored", ok, "client panel_stack %s" % str(gs.panel_stack))
+	report.check("g11_rack_action", InputMap.has_action("rack"), "")
+	if cam().picked_object != null:
+		cam().release_held_object()
+	# look ahead and a little up: nothing rackable under the interact ray, so the key withdraws
+	var p0 := player().global_position
+	cam().rotation.x = 0.25
+	await sleep_ms(500)
+	var lost0 := int(bodies().counters().get("puppet_lost", 0))
+
+	# (a) the rack key with free hands
+	report.mark("g11a_pressed")
+	var t0 := Time.get_ticks_msec()
+	var started0 := _counter("grab_carry_started")
+	await _press("rack")
+	var ea := await _g11_carry("g11a", [], t0, started0)
+
+	# (b) place it (LMB) with auto_rack on: the game's own refill asks for the next panel
+	mm.settings.gameplay.auto_rack = true
+	var rel0 := _counter("grab_rel_tx")
+	started0 = _counter("grab_carry_started")
+	report.mark("g11b_pressed")
+	t0 = Time.get_ticks_msec()
+	await Crate.press_lmb(self)
+	report.check("g11b_placed_own_rel", ea > 0 and _counter("grab_rel_tx") > rel0, "rel_tx %d -> %d" % [rel0, _counter("grab_rel_tx")])
+	var eb := await _g11_carry("g11b", [ea], t0, started0)
+	mm.settings.gameplay.auto_rack = false
+
+	# (c) hands full when the grant lands (panel B still carried): back on the rack, nothing drops.
+	# The game's own input never withdraws with full hands; a withdraw sent with free hands
+	# meets full ones when the player grabs something within the RTT. This sends it directly.
+	var held_b = cam().picked_object
+	var c0: Dictionary = grab().counters()
+	var stack0: int = gs.panel_stack.size()
+	report.mark("g11c_pressed", {"g11_holding": eb})
+	var gp = session.get_module("gameplay")
+	var sent: bool = gp != null and gp.rack.client_withdraw()
+	report.check("g11c_withdraw_sent", sent, "stack %d" % stack0)
+	ok = await wait_for(func(): return _counter("grab_carry_busy") > int(c0.get("grab_carry_busy", 0)), 3.0)
+	report.check("g11c_busy_seen", ok, "carry_busy %d" % _counter("grab_carry_busy"))
+	report.check("g11c_busy_racked", _counter("grab_carry_racked") == int(c0.get("grab_carry_racked", 0)) + 1, "carry_racked %d -> %d" % [
+		int(c0.get("grab_carry_racked", 0)), _counter("grab_carry_racked")])
+	report.check("g11c_hands_unchanged", held_b != null and cam().picked_object == held_b, "picked %s" % str(cam().picked_object))
+	var rv: Dictionary = await wait_peer_mark("g11c_result", 10.0)
+	var ec := int(rv.get("g11_eid", 0))
+	var host_stack := int(rv.get("g11_host_stack", -1))
+	report.check("g11c_host_named_panel", ec > 0 and ec != ea and ec != eb, "eid %d" % ec)
+	ok = await wait_for(func(): return ec > 0 and bodies().node_of(ec) == null, 3.0)
+	report.check("g11c_panel_gone_on_client", ok, "eid %d" % ec)
+	await sleep_ms(300)
+	# the vanilla busy branch would push a pool id on the LOCAL stack and recycle the puppet
+	report.check("g11c_stack_matches_host", gs.panel_stack.size() == host_stack and host_stack == stack0, "client %d host %d (before %d)" % [
+		gs.panel_stack.size(), host_stack, stack0])
+	var lost := int(bodies().counters().get("puppet_lost", 0))
+	report.check("g11c_no_puppet_lost", lost == lost0, "puppet_lost %d -> %d" % [lost0, lost])
+	var loose: Array = []
+	for n in tree().get_nodes_in_group("panel"):
+		if not _g11_is_panel(n) or not n.is_inside_tree() or not (n as Node3D).visible or n == held_b or _eid(n) == ea:
+			continue
+		if (n as Node3D).global_position.distance_to(p0) < 4.0:
+			loose.append("%s eid %d" % [n.name, _eid(n)])
+	report.check("g11c_no_panel_dropped", loose.is_empty(), str(loose))
+	await shot("mp2-g11-client-after-busy")
+	report.mark("g11c_checked")
+
+	if cam().picked_object != null:
+		await Crate.press_lmb(self)
+		await sleep_ms(300)
+	cam().rotation.x = 0.0
+	mm.settings.gameplay.auto_rack = auto0
+	gs.upgrades["panel_rack"]["level"] = lvl0
+	report.mark("g11_client_done")
+	await wait_peer_mark("g11_end", 30.0)
