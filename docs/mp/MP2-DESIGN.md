@@ -1271,6 +1271,7 @@ grant path), `extensions/pause_menu_ext.gd`, `sync/progression.gd`, and the exis
 | `test_entities` (loader, extended) | L7 adopt/release, L8 reuse detection (hidden→visible within a frame) vs cannon store/fire |
 | `test_mp2_grab_protocol` | grant/deny/epoch, race (host vs client, two clients), release ordering before grant, revoke on silence/disconnect/far, host-player refusal |
 | `test_mp2_grab_prediction` | local refusal rules, deny undo, release capture next frame, throw meta age |
+| `test_mp2_carry_velocity` | a held body's records to a third peer carry its observed motion (still crate ~0, moving body its speed, capped at the sender's `l`); reordered or repeated frames hold still; a throw (own_rel) keeps the sender's velocity; host-decided releases (silence revoke) use the observed motion |
 | `test_mp2_gameplay_gate` | four gate kinds × three scopes; input scope only from the listed dispatchers |
 | `test_mp2_gameplay_interact` | whitelist, distance, rate, holder set, host exec |
 | `test_mp2_gameplay_redirect` | PlayerEffectRedirect restores the host player and forwards the delta |

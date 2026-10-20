@@ -234,7 +234,9 @@ static func state_from_json(d: Variant) -> Dictionary:
 ## reads about 4 m/s), so a state the host keeps for a release it decides itself
 ## (revoke, teardown, a malformed own_rel) carries this instead: the position step
 ## over the sender's spacing (t, else arrival rx), never faster than the sender's l;
-## no previous state (or no usable spacing) holds still. An owner's own release
+## no previous state (or no usable spacing) holds still, and so does a frame that
+## is not newer than the previous one by the sender's clock (a reorder or a repeat:
+## its step would point backwards). An owner's own release
 ## state (own_rel / own_unequip) keeps its velocity: that is the real throw.
 ## prev / cur: {p: Vector3, l: Vector3, t: sender ms, rx: arrival ms}
 static func observed_l(prev: Dictionary, cur: Dictionary) -> Vector3:
@@ -245,6 +247,8 @@ static func observed_l(prev: Dictionary, cur: Dictionary) -> Vector3:
 	var tb := int(cur.get("t", 0))
 	if ta != 0 and tb != 0:
 		dt_ms = posmod(tb - ta + 0x80000000, 0x100000000) - 0x80000000
+		if dt_ms <= 0:
+			return Vector3.ZERO
 	if (dt_ms <= 0 or dt_ms >= 500) and prev.has("rx") and cur.has("rx"):
 		dt_ms = int(cur.rx) - int(prev.rx)
 	if dt_ms <= 0 or dt_ms >= 1000:

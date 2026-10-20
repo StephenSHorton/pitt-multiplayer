@@ -223,6 +223,43 @@ func test_observed_l_helper() -> void:
 		"a previous release state without times: still")
 
 
+func test_reordered_frames_hold_still() -> void:
+	# an older frame (by the sender's clock) arriving after a newer one: its step
+	# points backwards, so it reads as still, never as a reversed throw
+	var a := {"p": Vector3(0.066, 0, 0), "l": Vector3(2, 0, 0), "t": 1066, "rx": 50}
+	var b := {"p": Vector3(0.033, 0, 0), "l": Vector3(2, 0, 0), "t": 1033, "rx": 80}
+	assert_eq(HeldStream.observed_l(a, b), Vector3.ZERO, "reordered: still")
+	b.t = 1066
+	assert_eq(HeldStream.observed_l(a, b), Vector3.ZERO, "a repeated sender time: still")
+	b.t = 1066 + 600
+	b.p = Vector3(0.066 + 0.03, 0, 0)
+	assert_true(HeldStream.observed_l(a, b).distance_to(Vector3(1, 0, 0)) < 0.001,
+		"a long sender gap still falls back to the arrival spacing")
+	var buf := [{"rx": 0, "t": 133, "p": Vector3(0.033, 0, 0), "l": Vector3(1, 0, 0)},
+		{"rx": 5, "t": 100, "p": Vector3.ZERO, "l": Vector3(1, 0, 0)}]
+	assert_eq(ClockRep._follow_extrap_v(buf), Vector3.ZERO, "follower: a reordered newest frame holds still")
+	buf[1].t = 133
+	assert_eq(ClockRep._follow_extrap_v(buf), Vector3.ZERO, "follower: a repeated sender time holds still")
+
+
+func test_reordered_frame_does_not_reverse_a_revoke_release() -> void:
+	var r := _held_rig()
+	var c = r.c(0)
+	_frames(r, c, 6, Vector3(0, 0.65, -1.5), Vector3(0, 0, 0.066), Vector3(0, 0.5, 3))
+	# a late copy of an earlier frame: older sender time, earlier pose
+	var ep: int = r.host.grab.host.rows[DUCK].epoch & 0xFF
+	r.host.grab.host.on_held_frame(c.id, {"t_ms": r.net.clock_ms - 66, "seq": 6, "records": [
+		{"eid": DUCK, "epoch": ep, "p": Vector3(0, 0.65, -1.5 + 0.066 * 4.0), "q": Quaternion.IDENTITY,
+			"l": Vector3(0, 0.5, 3), "a": Vector3.ZERO}]})
+	r.step(33)
+	r.steps(100, 20)
+	assert_eq(r.host.grab.counters().grab_revoke_reasons, {"silence": 1}, "revoked for silence")
+	var hr: Array = r.host.bodies.last("host_release")
+	assert_true((hr[2].l as Vector3).length() < 0.05,
+		"not flung backwards by the reordered step (%s)" % str(hr[2].l))
+	r.cleanup()
+
+
 ## The client's held frames, fed straight to the host (its own stream paused).
 func _frames(r: Rig, c, n: int, p0: Vector3, step: Vector3, carry_l: Vector3) -> void:
 	var ep: int = r.host.grab.host.rows[DUCK].epoch & 0xFF

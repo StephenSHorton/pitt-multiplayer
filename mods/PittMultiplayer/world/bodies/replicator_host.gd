@@ -947,15 +947,19 @@ func _drive_followers(now: int) -> void:
 ## Extrapolation velocity of a follower past its newest frame: the observed motion
 ## of the last two frames (sender spacing t, else arrival rx), no longer than the
 ## newest frame's own velocity (which bounds a pair of frames that arrived in one
-## burst); one frame alone holds still. Also the velocity a follower's records carry
-## (_sample).
+## burst); one frame alone holds still, and so does a newest frame that is not newer
+## than the one before by the sender's clock (reordered or repeated: its step points
+## backwards). Also the velocity a follower's records carry (_sample).
 static func _follow_extrap_v(buf: Array) -> Vector3:
 	if buf.size() < 2:
 		return Vector3.ZERO
 	var a: Dictionary = buf[buf.size() - 2]
 	var b: Dictionary = buf[buf.size() - 1]
 	var dt_ms := posmod(int(b.get("t", 0)) - int(a.get("t", 0)) + 0x80000000, 0x100000000) - 0x80000000
-	if int(a.get("t", 0)) == 0 or int(b.get("t", 0)) == 0 or dt_ms <= 0 or dt_ms >= 500:
+	var timed := int(a.get("t", 0)) != 0 and int(b.get("t", 0)) != 0
+	if timed and dt_ms <= 0:
+		return Vector3.ZERO
+	if not timed or dt_ms >= 500:
 		dt_ms = int(b.rx) - int(a.rx)
 	if dt_ms <= 0:
 		return Vector3.ZERO
