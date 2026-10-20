@@ -382,7 +382,8 @@ func _b6_host() -> void:
 	report.begin("B6_conditioned")
 	var b = bodies()
 	var peer := int(session.peer_of_slot(CLIENT_SLOT))
-	var full: int = b.budget_bps(peer)
+	# the configured value: a clean link probes above it (0.2.3), so the live budget is no baseline
+	var full: int = int(b.welcome_rules().budget_bps)
 	session.set_conditioning(_b6_cond())
 	report.mark("b6_host_conditioned", {"b6_cond": _b6_cond()})
 	await wait_peer_mark("b6_client_conditioned", 30.0)

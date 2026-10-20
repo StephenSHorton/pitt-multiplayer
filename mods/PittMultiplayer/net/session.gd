@@ -2221,6 +2221,14 @@ func stats_line() -> String:
 			var kv := _fmt_kv(_peer_budget_info(p, hs), [])
 			if kv != "":
 				line += " " + kv
+	elif role == "client":
+		var cl := {}
+		for k in bc:
+			if str(k).begins_with("cl_"):
+				cl[k] = bc[k]
+		var kv := _fmt_kv(cl, [])
+		if kv != "":
+			line += " | client " + kv
 	return line
 
 

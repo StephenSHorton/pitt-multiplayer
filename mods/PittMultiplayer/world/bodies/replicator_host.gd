@@ -263,7 +263,6 @@ var _phys_load := 0.0              # the last physics load the overload guard sa
 var _last_meta_ms := 0
 var _followers: Dictionary = {}    # eid -> true: bodies following a client's held stream
 var _watch: Dictionary = {}        # eid -> true: net-rested bodies Jolt still has awake / kinematic
-var _bytes_for_args := -1          # Budget.bytes_for's parameter count (4 = takes the peer count)
 var _cand_rr := 0                  # overload: start of this tick's window over the other candidates
 var _hidden_set: Dictionary = {}   # eid -> true: bodies hidden now (re-checked every send tick)
 # the client's extrapolation model (Interp, read once): a LIN / ANG record is re-sent
@@ -776,8 +775,10 @@ func on_netq(peer: int, msg: Dictionary) -> void:
 	var loss := float(gaps) / float(rx + gaps) if rx + gaps > 0 else 0.0
 	var rtt := _num(msg.get("rtt_ms", -1), -1)
 	ps.netq = {"rtt_ms": rtt, "loss": loss, "interp_ms": _num(msg.get("interp_ms", -1), -1),
-		"late": _num(msg.get("late", -1), -1), "puppets": _num(msg.get("puppets", -1), -1), "at": _now()}
-	ps.budget.report(_now(), loss, rtt)
+		"late": _num(msg.get("late", -1), -1), "puppets": _num(msg.get("puppets", -1), -1), "at": _now(),
+		# the client's own frame time and per-body staleness (0.2.3 clients)
+		"frame_p95_ms": _num(msg.get("frame_p95_ms", -1), -1), "stale_p95_ms": _num(msg.get("stale_p95_ms", -1), -1)}
+	ps.budget.report(_now(), loss, rtt, overload)
 
 
 ## A number from the wire (a peer's JSON) or a budget field, else `def` (never int(null)).
@@ -1228,17 +1229,10 @@ func _snap_patch(b: PackedByteArray, e: Ent, peer: int) -> PackedByteArray:
 	return c
 
 
-## This tick's bytes for a peer. The budget stream's bytes_for may take the in-game
-## peer count as a 4th parameter (P11: the overload halving only helps with two or
-## more peers); either way a lone peer's bytes are never halved for host CPU.
+## This tick's bytes for a peer. A lone peer's bytes are never halved for host CPU
+## (P11: the overload halving only helps with two or more peers).
 func _budget_bytes(ps: PeerState, seconds: float, n_peers: int) -> int:
-	var b = ps.budget
-	if _bytes_for_args < 0:
-		_bytes_for_args = b.get_method_argument_count("bytes_for") if b.has_method("bytes_for") else 3
-	var ov := overload if n_peers > 1 else 1.0
-	if _bytes_for_args >= 4:
-		return int(b.bytes_for(seconds, ov, _host_scale, n_peers))
-	return int(b.bytes_for(seconds, ov, _host_scale))
+	return int(ps.budget.bytes_for(seconds, overload, _host_scale, n_peers))
 
 
 func _send_peer(ps: PeerState, now: int, n_peers: int = 1) -> void:

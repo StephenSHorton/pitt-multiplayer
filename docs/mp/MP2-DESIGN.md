@@ -306,8 +306,8 @@ reports their lowest RTT is the minimum, so lasting 5-15 % loss on a slower rout
 good). Congestion for 2 s → ×0.7 every 2 s: loss > 15 %, or loss > 5 %
 while the RTT rose 20 ms over the minimum, may cut to the 12 KB/s floor; RTT alone (> 2× the minimum and
 > minimum + 50 ms) cuts at most to half the configured value, never below 18 KB/s (so on `low` too it stays
-above the loss floor). `report()` also ignores RTT alone while the host is overloaded, once
-`replicator_host.gd` passes its overload factor (pending: the host stream's call-site change).
+above the loss floor). `report()` also ignores RTT alone while the host is overloaded (`replicator_host.gd` passes its overload
+factor).
 Clean for 5 s → +15 % of the configured value per second up to it. Probe-up: quiet (no queueing, loss ≤ 5 %)
 for 10 s at the configured value → +5 % of it per second up to a ceiling of 3× configured (at most
 400 KB/s, the host-wide upload cap); any queueing or loss above the configured value drops straight back

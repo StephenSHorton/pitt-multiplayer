@@ -383,7 +383,6 @@ func test_overload_sheds_candidates_not_a_lone_peers_bytes() -> void:
 	var ps = rep.peers[PEER]
 	assert_eq(rep._budget_bytes(ps, 0.033, 1), ps.budget.bytes_for(0.033, 1.0, 1.0), "a lone peer's bytes are not halved")
 	assert_true(rep._budget_bytes(ps, 0.033, 2) < ps.budget.bytes_for(0.033, 1.0, 1.0), "two peers: halved as before")
-	assert_true(int(rep._bytes_for_args) >= 3, "bytes_for's parameters detected (%d)" % rep._bytes_for_args)
 	assert_true(int(rep.counters.cand_shed) > 0, "candidates shed")
 	var t0: int = rep.t
 	for k in 90:
