@@ -1,8 +1,9 @@
 extends RefCounted
 ## Per-player panel rack (D13, MP2-DESIGN 6.11). GameState.panel_stack is the
 ## carried rack of the LOCAL player; the host keeps one stack per remote peer.
-## Client (main_camera_interact_ext): racking a panel sends rack_store {eid};
-## withdrawing sends rack_withdraw {}. Host: store recycles that entity and pushes
+## Client (main_camera_interact_ext): racking a panel sends rack_store {eid} and
+## waits for the host's answer before the carry ends (client_store); withdrawing
+## sends rack_withdraw {}. Host: store recycles that entity and pushes
 ## its pool id on the peer's stack; withdraw pops it, spawns the panel at the
 ## peer's rig hands and grants it to the peer as held (grab.grant, carry) once the
 ## entity is tracked. Each peer's stack is mirrored to that peer only, as an
@@ -14,11 +15,27 @@ const STORE_REACH_M := 6.0
 const BUSY_METAS := ["consumed", "orbit_in_orbit", "pending_maw_recycle", "in_cannon_barrel", "in_vacuum_bag",
 	"pitt_mp_press_stroke"]
 const RETURN_SPREAD_M := 0.6
+## Client: a rack_store with no answer after this long counts as refused (the
+## panel stays in the hands); a later "stored" answer still ends the carry.
+const STORE_WAIT_MS := 2000
+
+
+## Client: one rack_store in flight (client_store).
+class StoreReq extends RefCounted:
+	var eid := 0
+	var node: Node3D = null
+	var hid := false             # client_store hid the node until the answer
+	var settled := false         # answered or timed out
+	var on_answer := Callable()
+
 
 var gp = null
 var _stacks: Dictionary = {}        # peer -> Array[String] of pool ids
 var _pending: Dictionary = {}       # node instance id -> peer (spawned for a withdraw, grant on track)
-var _ctr := {"rack_stored": 0, "rack_withdrawn": 0, "rack_refused": 0, "rack_returned": 0}
+var _ctr := {"rack_stored": 0, "rack_withdrawn": 0, "rack_refused": 0, "rack_returned": 0,
+	"client_store_sent": 0, "client_store_ok": 0, "client_store_refused": 0, "client_store_timeout": 0}
+var _store_pend: Dictionary = {}    # client: eid -> StoreReq (rack_store sent, no answer yet)
+var store_wait_ms := STORE_WAIT_MS
 
 
 func _init(p_gp) -> void:
@@ -32,6 +49,10 @@ func counters() -> Dictionary:
 func clear() -> void:
 	_stacks.clear()
 	_pending.clear()
+	for req in _store_pend.values():
+		(req as StoreReq).settled = true
+		_store_unhide(req)
+	_store_pend.clear()
 
 
 func stack_of(peer: int) -> Array:
@@ -231,18 +252,100 @@ func client_apply_stack(stack) -> bool:
 	return true
 
 
-## Client: what main_camera_interact_ext calls instead of the local rack.
-func client_store(panel: Object) -> bool:
+## Client: what main_camera_interact_ext calls instead of the local rack (and
+## GRAB's busy branch of a granted carry, 6.11). false = nothing sent (the
+## vanilla "rack full": the caller carries on as if racking had not happened).
+## true = rack_store {eid} is on its way: the panel is hidden but stays where it
+## is (in the hands, if carried) until the host answers, then
+## on_answer(result: String) runs with "stored" (the host recycled it and pushed
+## it on this peer's stack: end the carry), "refused" (shown again, still
+## carried) or "timeout" (no answer in store_wait_ms: shown again, still
+## carried). A "stored" that comes after a "timeout" is still delivered.
+## The mirrored panel_stack is never written here, only by the host's fx rack,
+## so it cannot drift from the host's stack. One rack_store per panel at a time;
+## panels in flight count against the capacity like the racked ones.
+func client_store(panel: Object, on_answer: Callable = Callable()) -> bool:
 	var eid := int(gp.eid_of(panel))
 	if eid <= 0:
 		return false
+	if _store_pend.has(eid):
+		return true                  # already asked: that answer covers this press too
 	var gs = gp.adapter.game_state()
-	if gs != null and typeof(gs.get("panel_stack")) == TYPE_ARRAY and gs.get("panel_stack").size() >= _capacity():
+	if gs != null and typeof(gs.get("panel_stack")) == TYPE_ARRAY \
+			and gs.get("panel_stack").size() + _store_pend.size() >= _capacity():
 		return false
 	if gp.api == null or not ("commands" in gp.api):
 		return false
-	gp.api.commands.execute(gp.CMD_RACK_STORE, {"eid": eid})
+	var res = gp.api.commands.execute(gp.CMD_RACK_STORE, {"eid": eid})
+	if res == null or (bool(res.done) and not bool(res.ok)):
+		return false                 # refused on this machine (not connected): nothing in flight
+	var req := StoreReq.new()
+	req.eid = eid
+	req.node = panel as Node3D
+	req.on_answer = on_answer
+	_ctr.client_store_sent += 1
+	if bool(res.done):
+		_store_answered(res, req)
+		return true
+	_store_pend[eid] = req
+	if req.node != null and req.node.visible:
+		req.node.visible = false
+		req.hid = true
+	res.completed.connect(_store_answered.bind(req), CONNECT_ONE_SHOT)
+	var tree := Engine.get_main_loop() as SceneTree
+	if tree != null:
+		tree.create_timer(maxf(float(store_wait_ms), 1.0) / 1000.0, true, false, true).timeout.connect(
+			_store_expired.bind(req))
 	return true
+
+
+## Client: a rack_store for eid is waiting for the host's answer.
+func client_store_pending(eid: int) -> bool:
+	return _store_pend.has(eid)
+
+
+func _store_answered(res, req: StoreReq) -> void:
+	var late := req.settled
+	_store_settle(req)
+	if bool(res.ok):
+		# stays hidden: the host recycled it and its despawn follows (the pool
+		# shows the node again when it hands it out next)
+		_ctr.client_store_ok += 1
+		_store_answer(req, "stored")
+	elif not late:
+		_ctr.client_store_refused += 1
+		_store_unhide(req)
+		_store_answer(req, "refused")
+
+
+func _store_expired(req: StoreReq) -> void:
+	if req.settled:
+		return
+	_store_settle(req)
+	_ctr.client_store_timeout += 1
+	_store_unhide(req)
+	_store_answer(req, "timeout")
+
+
+func _store_settle(req: StoreReq) -> void:
+	req.settled = true
+	if _store_pend.get(req.eid, null) == req:
+		_store_pend.erase(req.eid)
+
+
+## Show the panel again, unless its node went back to the pool meanwhile (it may
+## stand for another entity by now).
+func _store_unhide(req: StoreReq) -> void:
+	if not req.hid:
+		return
+	req.hid = false
+	if is_instance_valid(req.node) and int(gp.eid_of(req.node)) == req.eid:
+		req.node.visible = true
+
+
+func _store_answer(req: StoreReq, result: String) -> void:
+	if req.on_answer.is_valid():
+		req.on_answer.call(result)
 
 
 func client_withdraw() -> bool:
