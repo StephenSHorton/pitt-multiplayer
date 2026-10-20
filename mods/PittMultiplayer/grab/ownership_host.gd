@@ -307,7 +307,11 @@ func on_held_frame(peer: int, frame: Dictionary) -> void:
 		r.last_rx_ms = now
 		var st := {"p": p, "q": rec.get("q", Quaternion.IDENTITY), "l": rec.get("l", Vector3.ZERO),
 			"a": rec.get("a", Vector3.ZERO)}
-		r.last_state = st
+		# the follower gets the frame as sent; the state kept for a release the host
+		# decides (revoke, teardown) moves at the observed velocity, not the carry pull
+		var kept := {"p": p, "q": st.q, "l": st.l, "a": st.a, "t": t_ms, "rx": now}
+		kept["l"] = HeldStream.observed_l(r.last_state, kept)
+		r.last_state = kept
 		counters.held_rx += 1
 		var bodies = grab.bodies()
 		if bodies != null:

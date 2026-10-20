@@ -229,6 +229,35 @@ static func state_from_json(d: Variant) -> Dictionary:
 	return {"p": p, "q": q.normalized(), "l": l, "a": a}
 
 
+## The motion a held body shows between two accepted held states (0.2.3). A held
+## frame's l is the owner's carry pull toward its hands (a full crate hanging still
+## reads about 4 m/s), so a state the host keeps for a release it decides itself
+## (revoke, teardown, a malformed own_rel) carries this instead: the position step
+## over the sender's spacing (t, else arrival rx), never faster than the sender's l;
+## no previous state (or no usable spacing) holds still, and so does a frame that
+## is not newer than the previous one by the sender's clock (a reorder or a repeat:
+## its step would point backwards). An owner's own release
+## state (own_rel / own_unequip) keeps its velocity: that is the real throw.
+## prev / cur: {p: Vector3, l: Vector3, t: sender ms, rx: arrival ms}
+static func observed_l(prev: Dictionary, cur: Dictionary) -> Vector3:
+	if prev.is_empty() or not prev.has("p"):
+		return Vector3.ZERO
+	var dt_ms := 0
+	var ta := int(prev.get("t", 0))
+	var tb := int(cur.get("t", 0))
+	if ta != 0 and tb != 0:
+		dt_ms = posmod(tb - ta + 0x80000000, 0x100000000) - 0x80000000
+		if dt_ms <= 0:
+			return Vector3.ZERO
+	if (dt_ms <= 0 or dt_ms >= 500) and prev.has("rx") and cur.has("rx"):
+		dt_ms = int(cur.rx) - int(prev.rx)
+	if dt_ms <= 0 or dt_ms >= 1000:
+		return Vector3.ZERO
+	var obs: Vector3 = ((cur.get("p", Vector3.ZERO) as Vector3) - (prev.p as Vector3)) / (float(dt_ms) / 1000.0)
+	var cap := (cur.get("l", Vector3.ZERO) as Vector3).length()
+	return obs.limit_length(cap)
+
+
 ## [x,y,z] -> Vector3; Vector3(NAN, ...) when malformed.
 static func vec3(v: Variant) -> Vector3:
 	if typeof(v) != TYPE_ARRAY or v.size() != 3:

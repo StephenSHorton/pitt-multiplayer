@@ -24,7 +24,9 @@ extends RefCounted
 ##     one fired right after it was loaded streams on the next tick
 ##   - records of a body are never sent to the peer that owns it (GRAB)
 ##   - host_follow: a body held by a client follows the owner's held stream as a
-##     frozen kinematic body 50 ms behind; host_release restores it exactly
+##     frozen kinematic body 50 ms behind; host_release restores it exactly. Its
+##     records to the other peers carry the motion the held frames show (last two
+##     frames, capped by the sender's velocity), not the sender's carry velocity
 ##   - per send tick the work shared by every peer is done once (sampling, the
 ##     peer-independent weight, the encoded record bytes); per peer only the
 ##     distance weight, the accumulator and a native-sorted top-k remain
@@ -592,7 +594,11 @@ func _sample(e: Ent) -> void:
 		l = n.linear_velocity
 		av = n.angular_velocity
 	if e.follow_peer != 0 and not e.follow.is_empty():
-		l = e.follow.back().l
+		# a held frame's l is the owner's carry pull toward its hands (a full crate
+		# hanging still reads about 4 m/s), not the body's motion: the records every
+		# other peer extrapolates (and the change gate's prediction) carry the motion
+		# of the last two frames instead, never faster than the sender's l (0.2.3)
+		l = _follow_extrap_v(e.follow)
 		av = e.follow.back().a
 	if e.has_sample:
 		var jump := p.distance_to(e.p)
@@ -941,14 +947,19 @@ func _drive_followers(now: int) -> void:
 ## Extrapolation velocity of a follower past its newest frame: the observed motion
 ## of the last two frames (sender spacing t, else arrival rx), no longer than the
 ## newest frame's own velocity (which bounds a pair of frames that arrived in one
-## burst); one frame alone holds still.
+## burst); one frame alone holds still, and so does a newest frame that is not newer
+## than the one before by the sender's clock (reordered or repeated: its step points
+## backwards). Also the velocity a follower's records carry (_sample).
 static func _follow_extrap_v(buf: Array) -> Vector3:
 	if buf.size() < 2:
 		return Vector3.ZERO
 	var a: Dictionary = buf[buf.size() - 2]
 	var b: Dictionary = buf[buf.size() - 1]
 	var dt_ms := posmod(int(b.get("t", 0)) - int(a.get("t", 0)) + 0x80000000, 0x100000000) - 0x80000000
-	if int(a.get("t", 0)) == 0 or int(b.get("t", 0)) == 0 or dt_ms <= 0 or dt_ms >= 500:
+	var timed := int(a.get("t", 0)) != 0 and int(b.get("t", 0)) != 0
+	if timed and dt_ms <= 0:
+		return Vector3.ZERO
+	if not timed or dt_ms >= 500:
 		dt_ms = int(b.rx) - int(a.rx)
 	if dt_ms <= 0:
 		return Vector3.ZERO

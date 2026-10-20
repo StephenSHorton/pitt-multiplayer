@@ -677,7 +677,12 @@ The host's own player is peer 1: a host grab sets `{1, "held"}` so clients see `
    `2 × max_grab_distance + 1 m + |avatar velocity| × 0.15 s`, at most 9 m) to `bodies.host_follow_push`,
    which drives the kinematic follower 50 ms behind (not 100: the host copy interacts with the host world).
    Invalid frames are counted (`held_rejected`); 1.0 s of continuous distance violations revokes (`far`).
-5. **Other clients** see the body through normal host frames with `HELD` (priority weight 4.0).
+5. **Other clients** see the body through normal host frames with `HELD` (priority weight 4.0). A held
+   frame's velocity is the game carry's pull toward the hands (a full crate hanging still reads about
+   4 m/s), so those records (and the host's change gate) carry the motion of the last two held frames,
+   never faster than the sender's velocity (0.2.3). The state the host keeps for a release it decides
+   itself (`silence` / `far` revoke, teardown, a malformed `own_rel`) moves at that observed velocity
+   too; an owner's `own_rel` keeps the velocity it sent (the real throw).
 
 ### 5.3 Release and throw handoff
 
@@ -1274,6 +1279,7 @@ grant path), `extensions/pause_menu_ext.gd`, `sync/progression.gd`, and the exis
 | `test_entities` (loader, extended) | L7 adopt/release, L8 reuse detection (hidden→visible within a frame) vs cannon store/fire |
 | `test_mp2_grab_protocol` | grant/deny/epoch, race (host vs client, two clients), release ordering before grant, revoke on silence/disconnect/far, host-player refusal |
 | `test_mp2_grab_prediction` | local refusal rules, deny undo, release capture next frame, throw meta age |
+| `test_mp2_carry_velocity` | a held body's records to a third peer carry its observed motion (still crate ~0, moving body its speed, capped at the sender's `l`); reordered or repeated frames hold still; a throw (own_rel) keeps the sender's velocity; host-decided releases (silence revoke) use the observed motion |
 | `test_mp2_gameplay_gate` | four gate kinds × three scopes; input scope only from the listed dispatchers |
 | `test_mp2_gameplay_interact` | whitelist, distance, rate, holder set, host exec |
 | `test_mp2_gameplay_redirect` | PlayerEffectRedirect restores the host player and forwards the delta |
