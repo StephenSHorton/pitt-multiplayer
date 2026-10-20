@@ -50,6 +50,8 @@ const DEFAULT_SETTINGS := {
 	"quarantine_threshold": 50,
 	"quarantine_window_s": 10.0,
 	"strict_game_version": false,
+	# P10: false restores the host pool reconciler's full diff every physics frame
+	"entity_reconcile_gate": true,
 }
 
 var api_version := VERSION

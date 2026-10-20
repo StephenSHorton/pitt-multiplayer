@@ -597,6 +597,7 @@ Global PittAPI settings live in `user://pittapi/config/pittapi.cfg`:
 - `cheats_allowed=true`
 - `quarantine_threshold`
 - `strict_game_version`
+- `entity_reconcile_gate=true` (false: the hosting pool reconciler runs its full diff every physics frame again, see MP2-DESIGN L8)
 
 ### 6.11 Console (optional, dev)
 

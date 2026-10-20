@@ -135,7 +135,8 @@ func release_entity(entity_id: int) -> void:
 		_core.entities.release(entity_id)
 
 
-## L8: {full_every_frame: bool, detect_reuse: bool} for the pool reconciler.
+## L8: {full_every_frame: bool, detect_reuse: bool, gate_full_diff: bool} for the
+## pool reconciler (gate_full_diff: the P10 dirty gate, default on).
 func set_reconcile_mode(mode: Dictionary) -> void:
 	if is_provider():
 		_core.entities.set_reconcile_mode(mode)
