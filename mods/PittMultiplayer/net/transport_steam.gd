@@ -17,11 +17,42 @@ extends "transport.gd"
 ## transport's lane map (lane_map, on by default) puts CH_WORLD on lane 1 with a
 ## one-byte channel tag. v0.2.0 sent CH_WORLD on lane 3: it arrived on lane 0 and
 ## was dropped (kind_not_allowed), so clients saw no spawns and no grant/interact.
+## Send rate: SteamNetworkingSockets paces every connection to its SendRateMin /
+## SendRateMax clamp and queues (never drops) what is over it, so a body budget
+## that probes above the clamp (budget.gd ceiling, up to 400 KB/s) would only
+## grow Steam's queue. The bundled GodotSteam 4.19.1 exposes no per-connection
+## handle on SteamMultiplayerPeer (its properties are no_delay, no_nagle,
+## server_relay, debug_level), but the Steam singleton has
+## setGlobalConfigValueInt32(NetworkingConfigValue, int) -> bool and the enum
+## values NETWORKING_CONFIG_SEND_RATE_MIN / _MAX (both found in the bundled
+## DLL's method binds and constant names). The global value is set before
+## create_host / create_client, so every connection made after it inherits it.
+## Min and max get the same value (the Steamworks header advises setting both
+## to configure a send rate; we found no header in reach to confirm whether
+## this build estimates bandwidth between them). Because a fixed rate also
+## paces the reliable bursts outside the body budget (world-snapshot chunks),
+## it is raised only as far as the host's physics_detail needs: the probe
+## ceiling plus SEND_RATE_HEADROOM_BPS, and only when that is above the about
+## 256 KB/s the Steamworks documentation gives as the default (in practice
+## only "high", ceiling 288 KB/s). Below that Steam's own setting stays. The
+## value is process-wide, so a later session with a lower need puts it back to
+## STEAM_DEFAULT_SEND_RATE_BPS. budget.gd stays the congestion brake.
 
 const VIRTUAL_PORT := 0
+## avatars, control, econ and the world stream on top of the body probe ceiling
+const SEND_RATE_HEADROOM_BPS := 64000
+## the send rate the Steamworks documentation gives as SteamNetworkingSockets' default
+const STEAM_DEFAULT_SEND_RATE_BPS := 262144
+const Budget = preload("../world/bodies/budget.gd")
 
 var mode := "socket"
+## the host's physics_detail ("" on a client: its uplink carries little, Steam's rate stays)
+var physics_detail := ""
 var _relay_inited := false
+## the send-rate clamp in effect when this transport opened (0: Steam's own)
+var send_rate_bps := 0
+## process-wide: the rate currently set through the global config (0: never touched)
+static var _applied_rate := 0
 
 
 func kind() -> String:
@@ -47,6 +78,44 @@ func _init_relay() -> void:
 	var steam = Engine.get_singleton("Steam")
 	if steam != null and steam.has_method("initRelayNetworkAccess"):
 		steam.initRelayNetworkAccess()
+	var want := send_rate_target(physics_detail, _applied_rate)
+	if want > 0 and want != _applied_rate and apply_send_rate(steam, steam_const("NETWORKING_CONFIG_SEND_RATE_MIN"),
+			steam_const("NETWORKING_CONFIG_SEND_RATE_MAX"), want):
+		_applied_rate = want
+	# also when an earlier session in this process set it (still in force, logged again)
+	send_rate_bps = _applied_rate
+	stats["send_rate"] = send_rate_bps
+
+
+## The rate to set for `detail` ("" = no need): the probe ceiling plus the
+## headroom when that is above Steam's default; else 0 (leave Steam alone), or
+## the default when an earlier session in this process raised it (`applied`).
+static func send_rate_target(detail: String, applied: int) -> int:
+	var need := 0
+	if detail != "":
+		need = Budget.ceiling_for(Budget.detail_bps(detail)) + SEND_RATE_HEADROOM_BPS
+	if need > STEAM_DEFAULT_SEND_RATE_BPS:
+		return need
+	return STEAM_DEFAULT_SEND_RATE_BPS if applied > 0 else 0
+
+
+## A Steam class constant through ClassDB (-1 when GodotSteam is absent), so this
+## script parses and runs headless without the Steam class.
+static func steam_const(const_name: String) -> int:
+	if ClassDB.class_exists("Steam") and ClassDB.class_has_integer_constant("Steam", const_name):
+		return ClassDB.class_get_integer_constant("Steam", const_name)
+	return -1
+
+
+## Sets the global SendRateMin and SendRateMax on `steam` (the Steam singleton,
+## or a test double). True when both calls exist and both returned true.
+static func apply_send_rate(steam: Object, key_min: int, key_max: int, rate: int) -> bool:
+	if steam == null or key_min < 0 or key_max < 0 or not steam.has_method("setGlobalConfigValueInt32"):
+		return false
+	# max first: a min above the current max could be refused
+	var ok_max := bool(steam.call("setGlobalConfigValueInt32", key_max, rate))
+	var ok_min := bool(steam.call("setGlobalConfigValueInt32", key_min, rate))
+	return ok_max and ok_min
 
 
 func _make_peer() -> MultiplayerPeer:

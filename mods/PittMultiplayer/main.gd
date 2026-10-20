@@ -140,7 +140,7 @@ func _define_config() -> void:
 	c.define("dev_targets", "", {"description": "comma-separated address:port rows of the dev Join list"})
 	c.define("dev_name", "", {"description": "player name in the dev lobby"})
 	c.define("physics_detail", "normal", {"options": ["low", "normal", "high"],
-		"description": "host: body-state budget per client (24 / 48 / 96 KB/s), MP2 D21"})
+		"description": "host: body-state budget per client (24 / 48 / 96 KB/s; a clean link probes up to 3x, at most 400 KB/s), MP2 D21"})
 	c.define("achievements", "presence", {"options": ["presence", "none", "all"],
 		"description": "presence: nothing for progress loaded on join, only crossings while connected (D4)"})
 	c.define("allow_remote_cheats", false, {"description": "host accepts cheat commands from clients"})
