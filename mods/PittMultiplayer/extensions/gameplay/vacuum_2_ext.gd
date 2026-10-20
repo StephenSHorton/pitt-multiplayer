@@ -5,6 +5,14 @@ extends "res://scripts/vacuum_2.gd"
 const G = preload("../../gameplay/mp_gate.gd")
 
 
+## P12 force guard: vacuum_2.gd's filter replaces vacuum.gd's (no super), so
+## vacuum_ext's space check is repeated here, ahead of the filter group check.
+func _suction_accepts(body: RigidBody3D) -> bool:
+	if not PhysicsServer3D.body_get_space(body.get_rid()).is_valid():
+		return false
+	return super(body)
+
+
 func scroll_tune_up() -> void:
 	if G.input(self, "scroll_tune_up"):
 		return

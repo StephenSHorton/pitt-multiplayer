@@ -10,7 +10,7 @@ func _ready() -> void:
 
 func _suction_accepts(body: RigidBody3D) -> bool:
 	_stub("_suction_accepts")
-	return false
+	return true   # no filter selected accepts everything
 
 func _get_release_marker() -> Marker3D:
 	_stub("_get_release_marker")

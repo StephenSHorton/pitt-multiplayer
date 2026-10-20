@@ -6,6 +6,16 @@ extends "res://scripts/vacuum.gd"
 const G = preload("../../gameplay/mp_gate.gd")
 
 
+## P12 force guard (all modes, single-player too): a body without a physics space
+## (parked by the pool with process_mode DISABLED, or out of the tree) is never a
+## suction target, so neither the pull nor an ingest reaches it. vacuum_2.gd
+## replaces this filter without super, so vacuum_2_ext repeats the guard.
+func _suction_accepts(body: RigidBody3D) -> bool:
+	if not PhysicsServer3D.body_get_space(body.get_rid()).is_valid():
+		return false
+	return super(body)
+
+
 func _check_ingestion() -> void:
 	if G.sink(self):
 		return

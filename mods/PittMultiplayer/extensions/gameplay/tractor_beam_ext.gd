@@ -5,6 +5,35 @@ extends "res://scripts/tractor_beam.gd"
 const G = preload("../../gameplay/mp_gate.gd")
 
 
+## P12 force guard (all modes, single-player too): the beam picks and pulls in one
+## game method, so a body in the beam's overlaps without a physics space (parked by
+## the pool with process_mode DISABLED) is marked static-frozen, which the game's
+## pick already skips, for the length of the call, then restored. It has no space,
+## so the round trip changes nothing in the simulation. Bodies in a space, and
+## every tick without a parked body, run the game's pull untouched.
+## Checked against Jolt Physics on 4.7.2 (headless suites run the default engine): Jolt
+## stores body_set_mode on a spaceless body silently, unlike apply_central_force, and a
+## pool-parked body re-enabled after the round trip is back in its space with its mode
+## and freeze unchanged.
+func _update_pull(delta: float) -> void:
+	var parked: Array = []
+	if beam_area != null:
+		for b in beam_area.get_overlapping_bodies():
+			if not (b is RigidBody3D) or PhysicsServer3D.body_get_space(b.get_rid()).is_valid():
+				continue
+			if b.freeze and b.freeze_mode == RigidBody3D.FREEZE_MODE_STATIC:
+				continue
+			parked.append([b, b.freeze, b.freeze_mode])
+			b.freeze_mode = RigidBody3D.FREEZE_MODE_STATIC
+			b.freeze = true
+	super(delta)
+	for p in parked:
+		var rb: RigidBody3D = p[0]
+		if is_instance_valid(rb):
+			rb.freeze = p[1]
+			rb.freeze_mode = p[2]
+
+
 func equipped_lmb_pressed() -> void:
 	if G.input_predict(self, "equipped_lmb_pressed"):
 		return
