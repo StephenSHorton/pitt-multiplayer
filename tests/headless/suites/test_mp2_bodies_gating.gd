@@ -4,16 +4,22 @@ extends "res://tests/test_case.gd"
 ## alone on a fake clock, its packets decoded by a stub session:
 ##   - still awake bodies (frozen KINEMATIC, or awake in Jolt) go to rest once and
 ##     then cost nothing but the rest refresh; one that moves wakes again
-##   - a moving body keeps the full 30 Hz
+##   - a moving body keeps the full 30 Hz; one in steady straight-line motion (LIN) or
+##     spinning (ANG) is thinned, and the real client Interp fed with the decoded
+##     packets never holds it and draws it where it is
 ##   - a held still body is only refreshed (1 Hz); a lost record heals within it
 ##   - a mass sleep under a full budget delivers every first SLEEP within a few ticks
 ##     while the awake bodies keep a share of every tick
-##   - hidden frozen bodies count as resting; followers have their own set
+##   - hidden frozen bodies count as resting; one fired right after loading (shown
+##     while the barrel meta is still set) streams with SNAP on the next tick
+##   - gated awake bodies leave the room they do not use to the first SLEEPs
+##   - followers have their own set
 ##   - overload sheds candidates (and physics steps), not a lone peer's bytes
 ##   - peer_budget_info / stats / counters carry the P1 fields; bad netq values are safe
 
 const Codec = preload("res://gamedir/mods/PittMultiplayer/net/codec.gd")
 const MetaSync = preload("res://gamedir/mods/PittMultiplayer/world/bodies/meta_sync.gd")
+const Interp = preload("res://gamedir/mods/PittMultiplayer/world/bodies/interp.gd")
 const PEER := 2
 
 
@@ -29,7 +35,7 @@ class StubSession extends RefCounted:
 	var rep = null
 	var in_game: Array = [2]
 	var drop := false
-	var recs: Array = []        # {t, eid, flags, p}
+	var recs: Array = []        # {t, eid, flags, p, q, l, a, hm (the packet's host ms)}
 	var bad_packets := 0
 
 	func in_game_peers() -> Array:
@@ -49,7 +55,8 @@ class StubSession extends RefCounted:
 			bad_packets += 1
 			return
 		for r in d.records:
-			recs.append({"t": rep.t, "eid": int(r.eid), "flags": int(r.flags), "p": r.p})
+			recs.append({"t": rep.t, "eid": int(r.eid), "flags": int(r.flags), "p": r.p, "q": r.q,
+				"l": r.l, "a": r.a, "hm": int(d.host_ms)})
 
 	func send_world(_peer: int, _k: String, _msg: Dictionary) -> void:
 		pass
@@ -257,6 +264,7 @@ func test_held_still_body_is_refreshed_and_a_lost_record_heals() -> void:
 	assert_true(n >= 2 and n <= 4, "a still held body is only refreshed, about 1 Hz (%d records in 3 s)" % n)
 	assert_true(int(rep.counters.gated) > 0, "gated ticks counted")
 	assert_true(int(rep.counters.refreshes) >= 2, "forced refreshes counted")
+	assert_true(int(rep.counters.refreshes) <= _count(s, eid, 0), "only refreshes actually sent are counted")
 	# its record is lost on the way; the forced refresh repairs it
 	(b[1] as Node3D).global_position = Vector3(1.5, 1.0, 1.0)
 	s.drop = true
@@ -427,6 +435,177 @@ func test_peer_budget_info_and_stats() -> void:
 	rep.on_netq(PEER, {"rx_pkts": null, "gaps": "x", "late": [], "interp_ms": {}, "rtt_ms": 1e30})
 	_tick(rep, 2)
 	assert_eq(int(rep.peer_budget_info(PEER).get("late", 0)), -1, "a bad value reads -1")
+	rep.clear()
+	_teardown()
+
+
+
+## A dynamic body without gravity or damping: it keeps its velocities exactly (Jolt).
+func _free_body(rep, pos: Vector3, v: Vector3, w: Vector3) -> Array:
+	var b: Array = _body(rep, pos, false)
+	var n: RigidBody3D = b[1]
+	n.linear_damp_mode = RigidBody3D.DAMP_MODE_REPLACE
+	n.angular_damp_mode = RigidBody3D.DAMP_MODE_REPLACE
+	n.linear_damp = 0.0
+	n.angular_damp = 0.0
+	n.linear_velocity = v
+	n.angular_velocity = w
+	(rep.ents[b[0]]).boost_until = 0       # past the spawn boost at once
+	return b
+
+
+## Real physics frames on the fake clock: each frame the client side first takes the
+## records that arrived (into a real Interp ring) and draws the body `behind_ms`
+## behind the host, then the host steps. -> {modes, max_err_m, max_err_deg, gaps, n}
+func _drive_client(rep, s, b: Array, frames: int, behind_ms: int) -> Dictionary:
+	var eid: int = b[0]
+	var n: RigidBody3D = b[1]
+	var hz := maxi(1, Engine.physics_ticks_per_second)
+	var t_base: int = rep.t
+	var ring: Array = []
+	var seen := 0
+	var out := {"modes": {}, "max_err_m": 0.0, "max_err_deg": 0.0, "gaps": [], "n": 0}
+	var last_t := -1
+	for f in frames:
+		await wait_physics(1)
+		rep.t = t_base + roundi(float(f + 1) * 1000.0 / float(hz))
+		while seen < s.recs.size():
+			var r: Dictionary = s.recs[seen]
+			seen += 1
+			if int(r.eid) != eid:
+				continue
+			Interp.ring_push(ring, {"t": int(r.hm), "p": r.p, "q": r.q, "l": r.l, "a": r.a,
+				"flags": int(r.flags), "epoch": 0})
+			if last_t >= 0:
+				(out.gaps as Array).append(int(r.hm) - last_t)
+			last_t = int(r.hm)
+			out.n = int(out.n) + 1
+		if ring.size() >= 2:
+			var rt: int = rep.t - behind_ms
+			var smp: Dictionary = Interp.sample(ring, rt)
+			var mode := String(smp.get("mode", ""))
+			out.modes[mode] = int(out.modes.get(mode, 0)) + 1
+			# where the body really was at rt (it moves and turns uniformly)
+			var back := float(rep.t - rt) / 1000.0
+			var p_true: Vector3 = n.global_position - n.linear_velocity * back
+			var q_now: Quaternion = n.global_basis.get_rotation_quaternion()
+			var q_true := q_now
+			var wl := n.angular_velocity.length()
+			if wl > 0.0001:
+				q_true = (Quaternion(n.angular_velocity / wl, -wl * back) * q_now).normalized()
+			out.max_err_m = maxf(float(out.max_err_m), (smp.p as Vector3).distance_to(p_true))
+			out.max_err_deg = maxf(float(out.max_err_deg), Interp.angle_deg(smp.q, q_true))
+		rep.physics_step()
+	return out
+
+
+func test_straight_line_body_is_thinned_but_never_held() -> void:
+	var h := _setup()
+	var rep = h[0]
+	var s = h[1]
+	var b: Array = _free_body(rep, Vector3(0, 1, 0), Vector3(1.0, 0.0, 0.0), Vector3.ZERO)
+	rep.peer_ready(PEER)
+	var hz := maxi(1, Engine.physics_ticks_per_second)
+	var r: Dictionary = await _drive_client(rep, s, b, hz * 3, 20)
+	var max_gap := 0
+	for g in r.gaps:
+		max_gap = maxi(max_gap, int(g))
+	assert_true(int(r.n) >= 8, "records keep coming (%d in 3 s)" % int(r.n))
+	assert_true(int(r.n) <= 60, "a straight line at constant velocity is thinned below 30 Hz (%d in 3 s)" % int(r.n))
+	assert_true(max_gap <= int(rep._extrap_min_ms) + 2,
+		"never older than the client's shortest extrapolation (%d ms, cap %d)" % [max_gap, rep._extrap_min_ms])
+	assert_eq(int(r.modes.get("hold", 0)), 0, "the client never holds it (%s)" % str(r.modes))
+	assert_true(float(r.max_err_m) < 0.005, "drawn where it is (%.4f m)" % float(r.max_err_m))
+	assert_eq(s.bad_packets, 0, "every packet decodes")
+	rep.clear()
+	_teardown()
+
+
+func test_spinning_body_drawn_as_it_turns() -> void:
+	var h := _setup()
+	var rep = h[0]
+	var s = h[1]
+	var b: Array = _free_body(rep, Vector3(0, 1, 0), Vector3.ZERO, Vector3(0.0, 2.0, 0.0))
+	rep.peer_ready(PEER)
+	var hz := maxi(1, Engine.physics_ticks_per_second)
+	var r: Dictionary = await _drive_client(rep, s, b, hz * 3, 40)
+	assert_true(int(r.n) >= 8, "records keep coming (%d in 3 s)" % int(r.n))
+	assert_eq(int(r.modes.get("hold", 0)), 0, "never held (%s)" % str(r.modes))
+	assert_true(float(r.max_err_deg) < 1.0, "the client's rotation follows the spin (%.2f deg, client rotates: %s)"
+		% [float(r.max_err_deg), str(rep._client_rotates)])
+	rep.clear()
+	_teardown()
+
+
+func test_fired_right_after_loading_streams_next_tick() -> void:
+	var h := _setup()
+	var rep = h[0]
+	var s = h[1]
+	# enough resting bodies that the rest scan needs several ticks for a lap
+	for i in 400:
+		var r: Array = _body(rep, Vector3((i % 20) * 0.5, 1.0, -3.0 - int(i / 20.0) * 0.5), true)
+		(r[1] as RigidBody3D).freeze_mode = RigidBody3D.FREEZE_MODE_STATIC
+	var b: Array = _body(rep, Vector3(0, 1, 0), true)
+	var n: RigidBody3D = b[1]
+	var eid: int = b[0]
+	# loaded into a cannon: frozen (pooled bodies are KINEMATIC), hidden, barrel meta
+	n.visible = false
+	n.set_meta("in_cannon_barrel", true)
+	rep.peer_ready(PEER)
+	_tick(rep, 3)
+	assert_false(rep.awake.has(eid), "a loaded projectile is resting")
+	# fired a few frames later, in the game's order: shown, meta dropped, unfrozen, pushed
+	rep._rest_scan_keys = rep.ents.keys()
+	rep._rest_scan_i = 0              # the scan is at the start of a lap: it will not reach it
+	n.visible = true
+	n.remove_meta("in_cannon_barrel")
+	n.freeze = false
+	n.linear_velocity = Vector3(0.0, 0.0, 10.0)
+	var t1: int = rep.t
+	_tick(rep, 1)
+	assert_true(rep.awake.has(eid), "awake on the next send tick")
+	var snap := false
+	for rec in s.recs:
+		if int(rec.eid) == eid and int(rec.t) > t1 and (int(rec.flags) & Codec.RF_SNAP) != 0 \
+				and (int(rec.flags) & Codec.RF_SLEEP) == 0:
+			snap = true
+	assert_true(snap, "and sent with SNAP at once")
+	rep.clear()
+	_teardown()
+
+
+func test_gated_awake_bodies_leave_the_room_to_first_sleeps() -> void:
+	var h := _setup()
+	var rep = h[0]
+	var s = h[1]
+	# 100 held still bodies: awake, but gated (only the 1 Hz refresh)
+	for i in 100:
+		var b: Array = _body(rep, Vector3(i * 0.3, 1.0, 10.0), true)
+		rep.set_owner(b[0], 1, "held", 1)
+	rep.peer_ready(PEER)
+	_tick(rep, 75)                  # past their boost
+	var sleepers: Array = []
+	for i in 300:
+		sleepers.append(_body(rep, Vector3((i % 20) * 0.3, 1.0, -int(i / 20.0) * 0.3), true))
+	var rested_tick := -1
+	var done_tick := -1
+	for k in 120:
+		_tick(rep, 1)
+		if rested_tick < 0 and rep.awake.size() <= 100:
+			rested_tick = k
+		if rested_tick >= 0:
+			var firsts := 0
+			for sl in sleepers:
+				if _count(s, sl[0], 0, 1) >= 1:
+					firsts += 1
+			if firsts == 300:
+				done_tick = k
+				break
+	assert_true(rested_tick >= 0, "the still bodies came to rest")
+	var room: int = 48000 * 33 / 1000 - 2 * (Codec.BODIES_HEADER + 40)
+	var bound: int = ceili(300.0 * Codec.BODY_BASE / float(room)) + 1
+	assert_true(done_tick >= 0 and done_tick - rested_tick <= bound,
+		"with every awake body gated the first SLEEPs get the whole tick: within %d ticks (%d)" % [bound, done_tick - rested_tick])
 	rep.clear()
 	_teardown()
 

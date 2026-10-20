@@ -253,12 +253,16 @@ full meta (3.5). Peers that are still loading get nothing on ch3 until their wor
   **rest refresh** (one sleeping body per peer per send tick, round-robin, about 570 B/s) heals any loss.
   A body that wakes is sent at once. Since 0.2.3 the first SLEEP of each rest goes out ahead of the awake
   records (a FIFO, oldest first, at most 60 % of a tick while bodies are awake); the repeats wait in one FIFO
-  per stage and take at most `SLEEP_SHARE` (40 %) of a tick, after the first sends. `mp stats` carries the
+  per stage and take at most `SLEEP_SHARE` (40 %) of a tick, after the first sends. Bytes the awake
+  selection does not want this tick (every awake body gated, say) go to the SLEEP queues as well. `mp stats` carries the
   backlog and the age of the oldest queued first SLEEP.
 - **Net-rest** (0.2.3): an awake body that nobody holds or follows and whose pose stays within 2 mm / 0.5° for
   400 ms is treated as resting (SLEEP, repeats, rest refresh) even though Jolt keeps it awake (a pile) or it is
   a still frozen-KINEMATIC body. A watch compares its pose every send tick and wakes it once it moves 5 mm or
-  turns. A frozen body that is hidden (cannon barrel, vacuum bag) or out of the tree counts as resting.
+  turns. A frozen body that is hidden (cannon barrel, vacuum bag) or out of the tree counts as resting; hidden
+  bodies are re-checked every send tick, because the cannon and the vacuum show a body before they drop its
+  barrel / bag meta and unfreeze it (the visibility signal still sees it hidden), so a body fired right after
+  loading streams, with SNAP, on the next tick.
 - `HELD`: owner ≠ host (GRAB calls `set_owner_view`). Records for an eid are **never sent to its owner**.
 - `NOCOLLIDE`: owner kind `equipped` (the tool sits on someone's rig, 6.4).
 - `epoch`: low byte of the ownership epoch.
@@ -275,13 +279,18 @@ boost_w  : 3.0 for 2 s after spawn, SNAP, release/throw, an interaction verb on 
 acc[c][e] += w * dt
 ```
 **Change gating (0.2.3).** The sender keeps, per peer, the last record it sent of each awake body (pose,
-velocity as encoded, time). `w` is further multiplied by `change_w(err)`, where `err` is the distance between
-the pose that peer's client extrapolates from that record (as `Interp.sample`: `p + l·t`, `t` at most 250 ms,
-rotation held) and the current pose, plus the rotation angle. `change_w` is 0 below 2 mm and 0.5°, so the
-body is not a candidate for that peer, and `1 + clamp(err / 5 cm + angle / 10°, 0, 3)` otherwise. A body not
-sent to a peer for 1 s is a candidate again whatever its error (the forced refresh, which heals a lost
-record); SNAP and boost bypass the gate, as does a body not yet sent since it woke. LIN is only encoded at
-0.05 m/s or faster (19 B records for still or crawling bodies).
+velocity and angular velocity as encoded, time). `w` is further multiplied by `change_w(err)`, where `err` is
+the distance between the pose that peer's client extrapolates from that record (as `Interp.sample`: `p + l·t`,
+and `q` turned by `a·t` when `Interp` rotates, which the host reads from `Interp` itself) and the current pose,
+plus the rotation angle. `change_w` is 0 below 2 mm and 0.5°, so the body is not a candidate for that peer, and
+`1 + clamp(err / 5 cm + angle / 10°, 0, 3)` otherwise. The client only extrapolates for about one update
+interval (at least `Interp.EXTRAP_MIN_MS`, 100 ms), so a record with LIN or ANG is a candidate again whatever
+its error once it is more than half a send interval short of that (about 83 ms; it goes out on the tick at
+about 100 ms): a body in steady motion is thinned to about 10 Hz, never held by the client, and stays inside
+the 11.2 staleness target. A body not sent to a peer for 1 s is a candidate again whatever its error (the
+forced refresh, which heals a lost record; `refreshes` counts the ones actually sent); SNAP and boost bypass
+the gate, as does a body not yet sent since it woke. LIN is only encoded at 0.05 m/s or faster (19 B records
+for still or crawling bodies).
 Each tick the sender takes entities in descending `acc` until the tick's byte budget `budget_bps(c) / 30`
 is used (records 19-31 B, packets ≤ 1200 B), sends them and zeroes their `acc`. Selection is a bucketed
 partial sort; the host spends at most **2 ms per tick** on selection for all peers and resumes the scan next

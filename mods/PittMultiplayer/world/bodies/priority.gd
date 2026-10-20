@@ -54,7 +54,7 @@ static func boost_w(boosted: bool) -> float:
 
 
 ## err_m: distance between the client's extrapolated pose and the current one;
-## rot_dot: |q_sent . q_now| (the client never extrapolates rotation). 0 below the
+## rot_dot: |q_extrapolated . q_now| (rotation as the client draws it). 0 below the
 ## gate, else 1 + the error measured in CHANGE_REF units (at most 4).
 static func change_w(err_m: float, rot_dot: float) -> float:
 	if err_m < GATE_POS_M and rot_dot > GATE_ROT_DOT:

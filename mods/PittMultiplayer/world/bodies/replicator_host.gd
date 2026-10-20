@@ -15,8 +15,13 @@ extends RefCounted
 ##     SLEEPs go out before the awake records (FIFO, at most FIRST_SHARE of a tick);
 ##     the repeats wait in one FIFO per stage under SLEEP_SHARE
 ##   - change gating (0.2.3): per peer the last record sent of each awake body is
-##     kept; a body whose pose matches what that client extrapolates from it is not a
-##     candidate (Priority.change_w), except for the 1 Hz forced refresh, SNAP and boost
+##     kept; a body whose pose matches what that client extrapolates from it (with
+##     Interp's own rules) is not a candidate (Priority.change_w), except for the 1 Hz
+##     forced refresh, SNAP and boost. A record with LIN / ANG is never left older
+##     than the shortest extrapolation the client allows (Interp.EXTRAP_MIN_MS), so a
+##     body in steady motion is thinned to about 10 Hz but the client never holds it
+##   - a hidden body (cannon barrel, vacuum bag) is re-checked every send tick, so
+##     one fired right after it was loaded streams on the next tick
 ##   - records of a body are never sent to the peer that owns it (GRAB)
 ##   - host_follow: a body held by a client follows the owner's held stream as a
 ##     frozen kinematic body 50 ms behind; host_release restores it exactly
@@ -40,6 +45,7 @@ const Budget = preload("budget.gd")
 const WorldSnapshot = preload("world_snapshot.gd")
 const EntityMeta = preload("entity_meta.gd")
 const MetaSync = preload("meta_sync.gd")
+const Interp = preload("interp.gd")
 
 const SEND_HZ := 30.0
 const SEND_INTERVAL_MS := 33
@@ -57,7 +63,8 @@ const FIRST_SHARE := 0.6              # first SLEEPs (and repeats) together at m
 const REFRESH_MS := 1000              # an awake body is re-sent at least this often (heals a lost record)
 const LIN_MIN := 0.05                 # m/s: slower bodies are sent without LIN (the client holds them)
 const ANG_MIN_SQ := 0.0025            # (rad/s)^2: faster spin carries ANG
-const EXTRAP_MS := 250                # the client's extrapolation limit (Interp.MAX_EXTRAP_MS)
+const EXTRAP_FALLBACK_MS := 100       # the client's shortest extrapolation when Interp names none
+const ANG_EPS := 0.0001               # rad/s below which the client does not rotate a record (Interp)
 const NET_REST_MS := 400              # still this long (pose within STILL_M / STILL_ROT_DOT): net-rest
 const STILL_M := 0.002
 const STILL_ROT_DOT := 0.99999048     # 0.5 deg
@@ -182,6 +189,7 @@ class PeerState extends RefCounted:
 	var ls_p := PackedVector3Array()
 	var ls_l := PackedVector3Array()     # its velocity as the client extrapolates it (0 without LIN)
 	var ls_q := PackedVector4Array()
+	var ls_a := PackedVector3Array()     # its angular velocity as encoded (0 without ANG)
 	var ls_t := PackedInt64Array()
 	var netq: Dictionary = {}            # the last netq: rtt_ms, loss, interp_ms, late, puppets, at
 	var gated := 0
@@ -212,6 +220,7 @@ class PeerState extends RefCounted:
 		ls_p.resize(n)
 		ls_l.resize(n)
 		ls_q.resize(n)
+		ls_a.resize(n)
 		ls_t.resize(n)
 		for i in range(old, n):
 			accs[i] = 0.0
@@ -255,6 +264,14 @@ var _followers: Dictionary = {}    # eid -> true: bodies following a client's he
 var _watch: Dictionary = {}        # eid -> true: net-rested bodies Jolt still has awake / kinematic
 var _bytes_for_args := -1          # Budget.bytes_for's parameter count (4 = takes the peer count)
 var _cand_rr := 0                  # overload: start of this tick's window over the other candidates
+var _hidden_set: Dictionary = {}   # eid -> true: bodies hidden now (re-checked every send tick)
+# the client's extrapolation model (Interp, read once): a LIN / ANG record is re-sent
+# once it is _extrap_ref_ms old (more than half a send interval short of the client's
+# shortest cap, so the send tick that re-sends it is at most about at that cap);
+# _client_rotates: Interp turns q by ANG (else the client holds rotation)
+var _extrap_min_ms := EXTRAP_FALLBACK_MS
+var _extrap_ref_ms := EXTRAP_FALLBACK_MS - SEND_INTERVAL_MS / 2 - 1
+var _client_rotates := false
 var _last_gauge_ms := 0
 # per-tick shared candidate cache (_sample_build)
 var _c_ents: Array = []
@@ -262,6 +279,7 @@ var _c_ai := PackedInt32Array()
 var _c_p := PackedVector3Array()
 var _c_l := PackedVector3Array()      # velocity as encoded (0 without LIN)
 var _c_q := PackedVector4Array()
+var _c_a := PackedVector3Array()      # angular velocity as encoded (0 without ANG)
 var _c_own := PackedInt32Array()      # the owning peer while held / equipped, else 0
 var _c_snap := PackedByteArray()      # 1 = some peer still owes a SNAP record
 var _c_force := PackedByteArray()     # 1 = boosted: bypasses the change gate
@@ -289,6 +307,21 @@ func _init(p_bodies = null, p_pool_ids: Array = [], p_detail: String = "normal")
 	bodies = p_bodies
 	detail = p_detail
 	set_pools(p_pool_ids)
+	_read_client_model()
+
+
+## The client's extrapolation rules from Interp itself, so the change gate predicts
+## exactly what the client draws: the shortest extrapolation cap (EXTRAP_MIN_MS, or
+## the single MAX_EXTRAP_MS of an Interp without one) and whether ANG turns q.
+func _read_client_model() -> void:
+	var cm: Dictionary = (Interp as Script).get_script_constant_map()
+	_extrap_min_ms = int(cm.get("EXTRAP_MIN_MS", cm.get("MAX_EXTRAP_MS", EXTRAP_FALLBACK_MS)))
+	_extrap_ref_ms = maxi(SEND_INTERVAL_MS, _extrap_min_ms - SEND_INTERVAL_MS / 2 - 1)
+	_client_rotates = false
+	for m in (Interp as Script).get_script_method_list():
+		if String(m.get("name", "")) == "rotate":
+			_client_rotates = true
+			break
 
 
 func set_pools(ids: Array) -> void:
@@ -359,6 +392,7 @@ func track(eid: int, node: Node, kind: String, ident: String) -> void:
 			_fb.append(WorldSnapshot.sp_row(eid, e.key, e.p, e.q, e.l, flags, meta))
 		if e.hidden:
 			_hid.append([eid, 1])
+			_hidden_set[eid] = true
 	else:
 		_fixture_eids[eid] = true
 		if not e.meta_last.is_empty():
@@ -388,6 +422,7 @@ func untrack(eid: int) -> void:
 	_fixture_eids.erase(eid)
 	_followers.erase(eid)
 	_watch.erase(eid)
+	_hidden_set.erase(eid)
 	_unschedule(eid)
 	tombs[eid] = _now() + TOMBSTONE_MS
 	if e.body:
@@ -418,6 +453,7 @@ func clear() -> void:
 	_fixture_eids.clear()
 	_followers.clear()
 	_watch.clear()
+	_hidden_set.clear()
 	if overload < 1.0:
 		overload = 1.0
 		_limit_steps(false)
@@ -511,9 +547,36 @@ func _update_hidden(e: Ent) -> void:
 		return
 	e.hidden = h
 	_hid.append([e.eid, 1 if h else 0])
-	if not h:
+	if h:
+		_hidden_set[e.eid] = true
+	else:
+		_hidden_set.erase(e.eid)
 		_mark_snap(e)
 		_wake(e)
+
+
+## Resting hidden bodies, every send tick (there are few). A hidden frozen body
+## counts as resting, and a cannon / vacuum shows it (visibility_changed) before it
+## drops the barrel / bag meta and unfreezes it, so that signal still sees it hidden;
+## fired soon after loading, Jolt never reports a sleep change either. Without this
+## the rest scan (a lap of about 1 s) would be the only way it wakes.
+func _check_hidden() -> void:
+	if _hidden_set.is_empty():
+		return
+	var shown: Array = []
+	for eid in _hidden_set:
+		if awake.has(eid):
+			continue          # awake bodies are re-checked in _sample_build
+		var e: Ent = ents.get(eid, null)
+		var n := e.node() if e != null else null
+		if n == null or not _is_hidden(n):
+			shown.append(eid)
+	for eid in shown:
+		var e: Ent = ents.get(eid, null)
+		if e == null or e.node() == null:
+			_hidden_set.erase(eid)
+		else:
+			_update_hidden(e)
 
 
 func _sample(e: Ent) -> void:
@@ -802,6 +865,7 @@ func _physics_step() -> void:
 		_last_send_ms = now
 		_scan_resting()
 		_watch_net_rest()
+		_check_hidden()
 		_send_tick(now)
 	if not tombs.is_empty() and Engine.get_physics_frames() % 60 == 0:
 		for eid in tombs.keys():
@@ -882,6 +946,7 @@ func _sample_build(now: int, build: bool) -> void:
 	_c_p.resize(m)
 	_c_l.resize(m)
 	_c_q.resize(m)
+	_c_a.resize(m)
 	_c_own.resize(m)
 	_c_snap.resize(m)
 	_c_force.resize(m)
@@ -931,6 +996,7 @@ func _sample_build(now: int, build: bool) -> void:
 		_c_p[c] = e.p
 		_c_l[c] = e.l if flags & Codec.RF_LIN else Vector3.ZERO
 		_c_q[c] = Vector4(e.q.x, e.q.y, e.q.z, e.q.w)
+		_c_a[c] = e.a if flags & Codec.RF_ANG else Vector3.ZERO
 		_c_own[c] = e.owner if e.owner_kind != "" else 0
 		_c_snap[c] = 1 if (not boosted and not e.snap_peers.is_empty()) else 0
 		_c_force[c] = 1 if boosted else 0
@@ -941,6 +1007,7 @@ func _sample_build(now: int, build: bool) -> void:
 	_c_p.resize(c)
 	_c_l.resize(c)
 	_c_q.resize(c)
+	_c_a.resize(c)
 	_c_own.resize(c)
 	_c_snap.resize(c)
 	_c_force.resize(c)
@@ -1191,11 +1258,72 @@ func _send_peer(ps: PeerState, now: int, n_peers: int = 1) -> void:
 	var used := 0
 	var peer := ps.peer
 	var n_c := _c_ents.size()
-	# 1. SLEEP sends before the awake records (P7). First sends, oldest first, up to
+	# 1. awake bodies first (records are sent after the SLEEPs, see 2): accumulate the
+	#    priority (shared weight x this peer's distance weight x the change weight against
+	#    what this peer was sent last, P4) and drop the gated ones, so the SLEEP caps know
+	#    how many bytes the awake selection actually wants this tick
+	var accs := PackedFloat32Array()
+	var idx := PackedInt32Array()
+	var forced := PackedByteArray()      # by candidate: 1 = only a candidate for the 1 Hz refresh
+	var k := 0
+	var want := 0
+	if n_c > 0:
+		accs.resize(n_c)
+		idx.resize(n_c)
+		forced.resize(n_c)
+		forced.fill(0)
+		var inv := 1.0 / (Priority.DIST_SCALE * Priority.DIST_SCALE)
+		ps.fit(_ai_next)
+		var store := ps.accs
+		var ls_t := ps.ls_t
+		var ls_p := ps.ls_p
+		var ls_l := ps.ls_l
+		var ls_q := ps.ls_q
+		var ls_a := ps.ls_a
+		var floor_w := Priority.DIST_FLOOR
+		var gated := 0
+		for i in n_c:
+			if _c_own[i] == peer or _c_skip[i] != 0:
+				continue
+			var w: float = _c_w[i]
+			var force := _c_force[i] != 0
+			if _c_snap[i] != 0 and (_c_ents[i] as Ent).snap_peers.has(peer):
+				w *= Priority.BOOST
+				force = true
+			var ai := _c_ai[i]
+			var lt := ls_t[ai]
+			if not force and lt != 0:
+				var age := now - lt
+				if age >= REFRESH_MS:
+					forced[i] = 1
+				elif age < _extrap_ref_ms or (ls_l[ai] == Vector3.ZERO and ls_a[ai] == Vector3.ZERO):
+					# a LIN / ANG record this old is re-sent whatever its error: by the next
+					# tick the client could be past its shortest cap and holding the body
+					var cw := _change_w(ls_p[ai], ls_l[ai], ls_q[ai], ls_a[ai], age, _c_p[i], _c_q[i])
+					if cw <= 0.0:
+						gated += 1
+						continue
+					w *= cw
+			if has_pose:
+				w *= maxf(floor_w, 1.0 / (1.0 + _c_p[i].distance_squared_to(a_c) * inv))
+			var acc: float = store[ai] + w * dt
+			store[ai] = acc
+			accs[k] = acc
+			idx[k] = i
+			want += _c_size[i]
+			k += 1
+		accs.resize(k)
+		idx.resize(k)
+		ps.accs = store
+		ps.gated += gated
+		counters.gated += gated
+	# 2. SLEEP sends before the awake records (P7). First sends, oldest first, up to
 	#    FIRST_SHARE of the tick; then the due repeats (250 ms / 1 s / 3 s stages) up to
-	#    SLEEP_SHARE, after the first sends. With nothing awake they may fill the tick.
-	var first_cap := room if n_c == 0 else int(room * FIRST_SHARE)
-	var rep_cap := room if n_c == 0 else mini(first_cap, int(room * SLEEP_SHARE))
+	#    SLEEP_SHARE, after the first sends. Room the awake selection does not want this
+	#    tick (nothing awake, everything gated) is theirs as well.
+	var spare := maxi(0, room - want)
+	var first_cap := maxi(int(room * FIRST_SHARE), spare)
+	var rep_cap := maxi(mini(first_cap, int(room * SLEEP_SHARE)), spare)
 	var capped := false
 	var q: SleepQ = ps.sleep_first
 	while q.size() > 0:
@@ -1247,73 +1375,36 @@ func _send_peer(ps: PeerState, now: int, n_peers: int = 1) -> void:
 			ps.sleep_pending.erase(eid)
 	if capped:
 		counters.sleep_capped += 1
-	# 2. awake bodies by accumulated priority: shared weight x this peer's distance
-	#    weight x the change weight against what this peer was sent last (P4)
-	if n_c > 0:
-		var accs := PackedFloat32Array()
-		accs.resize(n_c)
-		var idx := PackedInt32Array()
-		idx.resize(n_c)
-		var k := 0
-		var inv := 1.0 / (Priority.DIST_SCALE * Priority.DIST_SCALE)
-		ps.fit(_ai_next)
+	# 3. the awake records that fit in what is left, highest accumulator first
+	if k > 0:
 		var store := ps.accs
 		var ls_t := ps.ls_t
 		var ls_p := ps.ls_p
 		var ls_l := ps.ls_l
 		var ls_q := ps.ls_q
-		var floor_w := Priority.DIST_FLOOR
-		var gated := 0
+		var ls_a := ps.ls_a
 		var refreshes := 0
-		for i in n_c:
-			if _c_own[i] == peer or _c_skip[i] != 0:
-				continue
-			var w: float = _c_w[i]
-			var force := _c_force[i] != 0
-			if _c_snap[i] != 0 and (_c_ents[i] as Ent).snap_peers.has(peer):
-				w *= Priority.BOOST
-				force = true
-			var ai := _c_ai[i]
-			var lt := ls_t[ai]
-			if not force and lt != 0:
-				var age := now - lt
-				if age < REFRESH_MS:
-					var pe: Vector3 = ls_p[ai] + ls_l[ai] * (float(mini(age, EXTRAP_MS)) / 1000.0)
-					var cw := Priority.change_w(pe.distance_to(_c_p[i]), absf(ls_q[ai].dot(_c_q[i])))
-					if cw <= 0.0:
-						gated += 1
-						continue
-					w *= cw
-				else:
-					refreshes += 1
-			if has_pose:
-				w *= maxf(floor_w, 1.0 / (1.0 + _c_p[i].distance_squared_to(a_c) * inv))
-			var acc: float = store[ai] + w * dt
-			store[ai] = acc
-			accs[k] = acc
-			idx[k] = i
-			k += 1
-		accs.resize(k)
-		idx.resize(k)
 		for j in Priority.select_top(accs, idx, _c_size, room - used):
 			recs.append(_rec_bytes(j, peer))
 			used += _c_size[j]
+			if forced[j] != 0:
+				refreshes += 1       # a refresh counts only when it is actually sent
 			var aj := _c_ai[j]
 			store[aj] = 0.0
 			ls_t[aj] = now
 			ls_p[aj] = _c_p[j]
 			ls_l[aj] = _c_l[j]
 			ls_q[aj] = _c_q[j]
+			ls_a[aj] = _c_a[j]
 		ps.accs = store
 		ps.ls_t = ls_t
 		ps.ls_p = ls_p
 		ps.ls_l = ls_l
 		ps.ls_q = ls_q
-		ps.gated += gated
+		ps.ls_a = ls_a
 		ps.refreshes += refreshes
-		counters.gated += gated
 		counters.refreshes += refreshes
-	# 3. rest refresh: one resting body per tick heals any lost SLEEP record
+	# 4. rest refresh: one resting body per tick heals any lost SLEEP record
 	if ps.rest_i >= ps.rest_keys.size():
 		ps.rest_keys = ents.keys()
 		ps.rest_i = 0
@@ -1345,6 +1436,21 @@ func _send_peer(ps: PeerState, now: int, n_peers: int = 1) -> void:
 	ps.win_bytes += bytes + pkts.size() * PKT_OVERHEAD
 	ps.win_payload += bytes
 	_roll_window(ps, now)
+
+
+## The change weight of a body for one peer (P4): the pose that peer's client draws
+## `age` ms after the last record it was sent (p + l * t; q turned by a when Interp
+## rotates, else held; t is below the client's shortest cap, see _extrap_ref_ms)
+## against the current pose.
+func _change_w(sp: Vector3, sl: Vector3, sq4: Vector4, sa: Vector3, age: int, p: Vector3, q4: Vector4) -> float:
+	var t := float(age) / 1000.0
+	var pe := sp + sl * t
+	var sq := Quaternion(sq4.x, sq4.y, sq4.z, sq4.w)
+	if _client_rotates:
+		var w := sa.length()
+		if w > ANG_EPS and age > 0:
+			sq = (Quaternion(sa / w, w * t) * sq).normalized()
+	return Priority.change_w(pe.distance_to(p), absf(sq.dot(Quaternion(q4.x, q4.y, q4.z, q4.w))))
 
 
 ## eff_bps (with the overhead estimate) and body_bps (body-frame bytes only) of the
